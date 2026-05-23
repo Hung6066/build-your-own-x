@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Hope.Agent.Application\Hope.Agent.Application.csproj" />
+    <ProjectReference Include="..\Hope.Agent.LLMGateway\Hope.Agent.LLMGateway.csproj" />
+    <ProjectReference Include="..\Hope.Agent.Tools\Hope.Agent.Tools.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.SemanticKernel" />
+  </ItemGroup>
+</Project>

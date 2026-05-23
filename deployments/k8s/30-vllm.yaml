@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vllm
+  namespace: hope-agent
+spec:
+  serviceName: vllm
+  replicas: 1
+  selector:
+    matchLabels: { app: vllm }
+  template:
+    metadata:
+      labels: { app: vllm }
+    spec:
+      nodeSelector:
+        nvidia.com/gpu.present: "true"
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model"
+            - "Qwen/Qwen3-8B-Instruct"
+            - "--served-model-name"
+            - "qwen3"
+            - "--max-model-len"
+            - "32768"
+            - "--gpu-memory-utilization"
+            - "0.90"
+            - "--enable-prefix-caching"
+          ports:
+            - containerPort: 8000
+              name: http
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+              memory: 32Gi
+              cpu: "8"
+            requests:
+              memory: 16Gi
+              cpu: "4"
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 120
+            periodSeconds: 30
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+  volumeClaimTemplates:
+    - metadata: { name: model-cache }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 200Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: hope-agent
+spec:
+  type: ClusterIP
+  selector: { app: vllm }
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000

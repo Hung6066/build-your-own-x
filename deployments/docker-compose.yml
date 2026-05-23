@@ -1,0 +1,173 @@
+name: hope-agent
+
+x-otel-env: &otel-env
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+  OTEL_SERVICE_NAMESPACE: hope.agent
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hope
+      POSTGRES_PASSWORD: hope
+      POSTGRES_DB: hope_agent
+    ports: ["5432:5432"]
+    volumes: ["./data/postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hope -d hope_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      ["redis-server", "--save", "60", "1", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["6379:6379"]
+    volumes: ["./data/redis:/data"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    restart: unless-stopped
+    ports: ["6333:6333", "6334:6334"]
+    volumes: ["./data/qdrant:/qdrant/storage"]
+
+  kafka:
+    image: bitnami/kafka:3.8
+    restart: unless-stopped
+    environment:
+      KAFKA_CFG_NODE_ID: 1
+      KAFKA_CFG_PROCESS_ROLES: broker,controller
+      KAFKA_CFG_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_CFG_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CFG_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_KRAFT_CLUSTER_ID: hope-agent-kafka-cluster
+    ports: ["9092:9092"]
+    volumes: ["./data/kafka:/bitnami/kafka"]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686" # UI
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    depends_on: [jaeger]
+
+  prometheus:
+    image: prom/prometheus:v3.0.0
+    restart: unless-stopped
+    volumes: ["./prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    ports: ["3000:3000"]
+    volumes: ["./data/grafana:/var/lib/grafana"]
+
+  temporal:
+    image: temporalio/auto-setup:1.25.1
+    restart: unless-stopped
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: hope
+      POSTGRES_PWD: hope
+      POSTGRES_SEEDS: postgres
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+    ports: ["7233:7233"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  temporal-ui:
+    image: temporalio/ui:2.32.0
+    restart: unless-stopped
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports: ["8088:8080"]
+    depends_on: [temporal]
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    restart: unless-stopped
+    command: >
+      --model Qwen/Qwen2.5-3B-Instruct
+      --served-model-name qwen3
+      --max-model-len 8192
+      --gpu-memory-utilization 0.85
+    ports: ["8000:8000"]
+    volumes: ["./data/vllm:/root/.cache/huggingface"]
+    profiles: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  api:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      args:
+        PROJECT: Hope.Agent.Api
+    restart: unless-stopped
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: hope.agent.api
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=hope_agent;Username=hope;Password=hope"
+      ConnectionStrings__Redis: "redis:6379"
+      Qdrant__Host: qdrant
+      Kafka__BootstrapServers: kafka:9092
+      Otel__Endpoint: http://otel-collector:4317
+      LLM__DefaultChatProvider: ${LLM_PROVIDER:-openai}
+      LLM__OpenAI__ApiKey: ${OPENAI_API_KEY:-}
+      LLM__Anthropic__ApiKey: ${ANTHROPIC_API_KEY:-}
+      LLM__Gemini__ApiKey: ${GEMINI_API_KEY:-}
+      LLM__Qwen__BaseUrl: ${QWEN_BASE_URL:-http://vllm:8000/v1}
+      Jwt__Secret: ${JWT_SECRET:-dev-secret-please-change-32-chars-minimum-length}
+      Temporal__TargetHost: ${TEMPORAL_HOST:-temporal:7233}
+      Temporal__EnableWorker: "true"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      qdrant: { condition: service_started }
+      kafka: { condition: service_started }
+    ports: ["5080:8080"]
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      args:
+        PROJECT: Hope.Agent.Gateway
+    restart: unless-stopped
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: hope.agent.gateway
+      ASPNETCORE_ENVIRONMENT: Production
+      Otel__Endpoint: http://otel-collector:4317
+      Jwt__Secret: ${JWT_SECRET:-dev-secret-please-change-32-chars-minimum-length}
+      ReverseProxy__Clusters__agent_api__Destinations__api-1__Address: http://api:8080/
+    depends_on: [api]
+    ports: ["5000:8080"]

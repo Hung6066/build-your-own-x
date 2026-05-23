@@ -1,0 +1,81 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hope-agent-gateway
+  namespace: hope-agent
+  labels: { app: hope-agent-gateway }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: hope-agent-gateway }
+  template:
+    metadata:
+      labels: { app: hope-agent-gateway }
+    spec:
+      serviceAccountName: hope-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gateway
+          image: ghcr.io/hope-agent/gateway:latest
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef: { name: hope-agent-config }
+            - secretRef: { name: hope-agent-secrets }
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: hope.agent.gateway
+            - name: ReverseProxy__Clusters__agent_api__Destinations__api__Address
+              value: "http://hope-agent-api.hope-agent.svc.cluster.local/"
+          resources:
+            requests: { cpu: "100m", memory: "256Mi" }
+            limits:   { cpu: "1",    memory: "1Gi" }
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hope-agent-gateway
+  namespace: hope-agent
+spec:
+  type: ClusterIP
+  selector: { app: hope-agent-gateway }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: hope-agent
+  namespace: hope-agent
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "8m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.hope-agent.example.com]
+      secretName: hope-agent-tls
+  rules:
+    - host: api.hope-agent.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: hope-agent-gateway
+                port: { number: 80 }

@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hope-agent-api
+  namespace: hope-agent
+  labels: { app: hope-agent-api }
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: hope-agent-api }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: hope-agent-api }
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      serviceAccountName: hope-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: ghcr.io/hope-agent/api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef: { name: hope-agent-config }
+            - secretRef: { name: hope-agent-secrets }
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: hope.agent.api
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+          readinessProbe:
+            httpGet: { path: /healthz/ready, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /healthz/live, port: http }
+            periodSeconds: 15
+            failureThreshold: 5
+          startupProbe:
+            httpGet: { path: /healthz/live, port: http }
+            failureThreshold: 30
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hope-agent
+  namespace: hope-agent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hope-agent-api
+  namespace: hope-agent
+  labels: { app: hope-agent-api }
+spec:
+  type: ClusterIP
+  selector: { app: hope-agent-api }
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hope-agent-api
+  namespace: hope-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hope-agent-api
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+    - type: Resource
+      resource: { name: memory, target: { type: Utilization, averageUtilization: 80 } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hope-agent-api
+  namespace: hope-agent
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels: { app: hope-agent-api }

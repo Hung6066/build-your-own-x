@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Hope.Agent.Gateway": {
+      "commandName": "Project",
+      "applicationUrl": "http://localhost:5000",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "ReverseProxy__Clusters__agent_api__Destinations__api-1__Address": "http://localhost:5080/"
+      }
+    }
+  }
+}

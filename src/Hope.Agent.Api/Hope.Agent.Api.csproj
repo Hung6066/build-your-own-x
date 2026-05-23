@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <ItemGroup>
+    <ProjectReference Include="..\Hope.Agent.AgentRuntime\Hope.Agent.AgentRuntime.csproj" />
+    <ProjectReference Include="..\Hope.Agent.Infrastructure\Hope.Agent.Infrastructure.csproj" />
+    <ProjectReference Include="..\Hope.Agent.Rag\Hope.Agent.Rag.csproj" />
+    <ProjectReference Include="..\Hope.Agent.MultiAgent\Hope.Agent.MultiAgent.csproj" />
+    <ProjectReference Include="..\Hope.Agent.Realtime\Hope.Agent.Realtime.csproj" />
+    <ProjectReference Include="..\Hope.Agent.Workflows\Hope.Agent.Workflows.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" />
+    <PackageReference Include="Microsoft.Extensions.Diagnostics.HealthChecks" />
+    <PackageReference Include="OpenTelemetry.Extensions.Hosting" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.AspNetCore" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+    <PackageReference Include="OpenTelemetry.Instrumentation.Runtime" />
+    <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+    <PackageReference Include="Serilog.AspNetCore" />
+    <PackageReference Include="Serilog.Sinks.OpenTelemetry" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+  </ItemGroup>
+</Project>

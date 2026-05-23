@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\Hope.Agent.Shared\Hope.Agent.Shared.csproj" />
+  </ItemGroup>
+</Project>
