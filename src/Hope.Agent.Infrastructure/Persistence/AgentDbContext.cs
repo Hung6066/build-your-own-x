@@ -1,9 +1,13 @@
 using Hope.Agent.Domain.Audit;
 using Hope.Agent.Domain.Conversations;
+using Hope.Agent.Domain.Insights;
 using Hope.Agent.Domain.Learning;
 using Hope.Agent.Domain.Memory;
+using Hope.Agent.Domain.Personalization;
 using Hope.Agent.Domain.Rag;
 using Hope.Agent.Domain.Security;
+using Hope.Agent.Domain.Tasks;
+using Hope.Agent.Domain.UserModeling;
 using Microsoft.EntityFrameworkCore;
 
 namespace Hope.Agent.Infrastructure.Persistence;
@@ -19,10 +23,17 @@ public sealed class AgentDbContext(DbContextOptions<AgentDbContext> options) : D
     public DbSet<Feedback> Feedback => Set<Feedback>();
     public DbSet<LearnedSkill> LearnedSkills => Set<LearnedSkill>();
     public DbSet<EvalRun> EvalRuns => Set<EvalRun>();
+    public DbSet<EvalCase> EvalCases => Set<EvalCase>();
     public DbSet<RoutingStat> RoutingStats => Set<RoutingStat>();
     public DbSet<ShadowComparison> ShadowComparisons => Set<ShadowComparison>();
     public DbSet<ChallengerConfig> ChallengerConfigs => Set<ChallengerConfig>();
     public DbSet<AdversarialPattern> AdversarialPatterns => Set<AdversarialPattern>();
+    public DbSet<ToolApprovalRequest> ToolApprovalRequests => Set<ToolApprovalRequest>();
+    public DbSet<UserTrait> UserTraits => Set<UserTrait>();
+    public DbSet<SessionSummary> SessionSummaries => Set<SessionSummary>();
+    public DbSet<UserPreference> UserPreferences => Set<UserPreference>();
+    public DbSet<ConversationSummary> ConversationSummaries => Set<ConversationSummary>();
+    public DbSet<KanbanTask> KanbanTasks => Set<KanbanTask>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -117,6 +128,18 @@ public sealed class AgentDbContext(DbContextOptions<AgentDbContext> options) : D
             e.HasIndex(x => new { x.Suite, x.StartedAt });
         });
 
+        b.Entity<EvalCase>(e =>
+        {
+            e.ToTable("eval_cases");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Suite).HasMaxLength(64);
+            e.Property(x => x.Name).HasMaxLength(256);
+            e.Property(x => x.UserMessage).HasColumnType("text");
+            e.Property(x => x.ReferenceAnswer).HasColumnType("text");
+            e.Property(x => x.Tags).HasMaxLength(512);
+            e.HasIndex(x => new { x.Suite, x.Active });
+        });
+
         b.Entity<RoutingStat>(e =>
         {
             e.ToTable("routing_stats");
@@ -155,6 +178,69 @@ public sealed class AgentDbContext(DbContextOptions<AgentDbContext> options) : D
             e.Property(x => x.Reason).HasMaxLength(128);
             e.HasIndex(x => x.Signature).IsUnique();
             e.HasIndex(x => x.Active);
+        });
+
+        b.Entity<ToolApprovalRequest>(e =>
+        {
+            e.ToTable("tool_approval_requests");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.ToolName).HasMaxLength(128);
+            e.Property(x => x.ArgumentsJson).HasColumnType("jsonb");
+            e.Property(x => x.Reason).HasMaxLength(512);
+            e.Property(x => x.Impact).HasConversion<int>();
+            e.Property(x => x.Status).HasConversion<int>();
+            e.HasIndex(x => new { x.Status, x.RequestedAt });
+            e.HasIndex(x => x.ConversationId);
+        });
+
+        b.Entity<UserTrait>(e =>
+        {
+            e.ToTable("user_traits");
+            e.HasKey(x => x.UserId);
+            e.Property(x => x.Role).HasMaxLength(64);
+            e.Property(x => x.Specialty).HasMaxLength(128);
+            e.Property(x => x.CommunicationStyle).HasMaxLength(64);
+            e.Property(x => x.PreferredLanguage).HasMaxLength(16);
+        });
+
+        b.Entity<SessionSummary>(e =>
+        {
+            e.ToTable("session_summaries");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Content).HasColumnType("text");
+            e.HasIndex(x => new { x.UserId, x.PeriodEnd });
+        });
+
+        b.Entity<UserPreference>(e =>
+        {
+            e.ToTable("user_preferences");
+            e.HasKey(x => x.UserId);
+            e.Property(x => x.AgentProfile).HasMaxLength(64);
+            e.Property(x => x.PreferredProvider).HasMaxLength(64);
+            e.Property(x => x.PreferredModel).HasMaxLength(128);
+        });
+
+        b.Entity<ConversationSummary>(e =>
+        {
+            e.ToTable("conversation_summaries");
+            e.HasKey(x => x.ConversationId);
+            e.Property(x => x.Content).HasColumnType("text");
+        });
+
+        b.Entity<KanbanTask>(e =>
+        {
+            e.ToTable("kanban_tasks");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Title).HasMaxLength(256);
+            e.Property(x => x.Description).HasColumnType("text");
+            e.Property(x => x.PatientRef).HasMaxLength(64);
+            e.Property(x => x.AssignedTo).HasMaxLength(128);
+            e.Property(x => x.Tags).HasMaxLength(256);
+            e.Property(x => x.Column).HasConversion<int>();
+            e.Property(x => x.Priority).HasConversion<int>();
+            e.HasIndex(x => new { x.Column, x.UpdatedAt });
+            e.HasIndex(x => x.UserId);
+            e.HasIndex(x => x.PatientRef);
         });
     }
 }

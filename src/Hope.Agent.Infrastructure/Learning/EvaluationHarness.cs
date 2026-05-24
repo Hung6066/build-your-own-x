@@ -14,13 +14,14 @@ internal sealed class EvaluationHarness(
     AgentDbContext db,
     ILLMRouter router,
     IJudge judge,
+    IEvalCaseStore caseStore,
     ILogger<EvaluationHarness> log) : IEvaluationHarness
 {
     private static readonly string GoldenPath = Path.Combine(AppContext.BaseDirectory, "Learning", "golden-suite.json");
 
     public async Task<EvalRun> RunSuiteAsync(string suiteName, CancellationToken ct)
     {
-        var items = LoadGolden();
+        var items = await ResolveCasesAsync(suiteName, ct);
         var run = new EvalRun
         {
             Id = Guid.CreateVersion7(),
@@ -77,6 +78,115 @@ internal sealed class EvaluationHarness(
             .ToListAsync(ct);
     }
 
+    public async Task<IReadOnlyList<EvalTrendPoint>> GetTrendAsync(string suite, int days, CancellationToken ct)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-days);
+        var runs = await db.EvalRuns.AsNoTracking()
+            .Where(r => r.Suite == suite && r.StartedAt >= cutoff && r.FinishedAt != null)
+            .OrderBy(r => r.StartedAt)
+            .ToListAsync(ct);
+
+        var trend = new List<EvalTrendPoint>(runs.Count);
+        for (var i = 0; i < runs.Count; i++)
+        {
+            var r = runs[i];
+            double? delta = i == 0 ? null : r.AvgJudgeScore - runs[i - 1].AvgJudgeScore;
+            trend.Add(new EvalTrendPoint(r.Id, r.StartedAt, r.Total, r.Passed, r.Failed, r.AvgJudgeScore, delta));
+        }
+        return trend;
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────────────
+
+    public async Task<EloTournamentResult> RunEloTournamentAsync(string suite, CancellationToken ct)
+    {
+        // Load the two most recent finished runs (tracked, so EF will detect changes)
+        var recent = await db.EvalRuns
+            .Where(r => r.Suite == suite && r.FinishedAt != null)
+            .OrderByDescending(r => r.StartedAt)
+            .Take(2)
+            .ToListAsync(ct);
+
+        if (recent.Count < 2)
+            throw new InvalidOperationException($"Suite '{suite}' needs at least 2 completed runs for an Elo tournament.");
+
+        var runA = recent[0]; // newer
+        var runB = recent[1]; // older challenger
+
+        var scoresA = ParseReportItems(runA.ReportJson);
+        var scoresB = ParseReportItems(runB.ReportJson);
+
+        int wins = 0, losses = 0, draws = 0;
+        const double margin = 0.05;
+        foreach (var (name, sA) in scoresA)
+        {
+            if (!scoresB.TryGetValue(name, out var sB)) continue;
+            if (sA > sB + margin) wins++;
+            else if (sB > sA + margin) losses++;
+            else draws++;
+        }
+        int total = wins + losses + draws;
+        double actualA = total == 0 ? 0.5 : (wins + 0.5 * draws) / total;
+        double expectedA = 1.0 / (1.0 + Math.Pow(10.0, (runB.EloRating - runA.EloRating) / 400.0));
+
+        runA.EloRating += EloK * (actualA - expectedA);
+        runB.EloRating += EloK * ((1.0 - actualA) - (1.0 - expectedA));
+
+        await db.SaveChangesAsync(ct);
+
+        log.LogInformation(
+            "Elo tournament suite={Suite}: {Wins}W-{Losses}L-{Draws}D → run {A} elo={EloA:F0}, run {B} elo={EloB:F0}",
+            suite, wins, losses, draws, runA.Id, runA.EloRating, runB.Id, runB.EloRating);
+
+        bool aWon = runA.EloRating >= runB.EloRating;
+        return new EloTournamentResult(
+            WinnerId: aWon ? runA.Id : runB.Id,
+            LoserId: aWon ? runB.Id : runA.Id,
+            WinnerEloAfter: aWon ? runA.EloRating : runB.EloRating,
+            LoserEloAfter: aWon ? runB.EloRating : runA.EloRating,
+            TotalMatchups: total,
+            WinnerWins: aWon ? wins : losses,
+            Draws: draws);
+    }
+
+    public async Task<IReadOnlyList<EvalRun>> GetLeaderboardAsync(string suite, int take, CancellationToken ct)
+    {
+        return await db.EvalRuns.AsNoTracking()
+            .Where(r => r.Suite == suite && r.FinishedAt != null)
+            .OrderByDescending(r => r.EloRating)
+            .Take(take)
+            .ToListAsync(ct);
+    }
+
+    private const double EloK = 32.0;
+
+    /// <summary>Extracts per-case {Name → Score} from the stored ReportJson.</summary>
+    private static Dictionary<string, double> ParseReportItems(string json)
+    {
+        var result = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                if (item.TryGetProperty("Name", out var n) && item.TryGetProperty("Score", out var s))
+                    result[n.GetString() ?? string.Empty] = s.GetDouble();
+            }
+        }
+        catch { /* ignore malformed JSON */ }
+        return result;
+    }
+
+    /// <summary>Tries DB first; falls back to the golden-suite.json file when DB is empty.</summary>
+    private async Task<List<GoldenItem>> ResolveCasesAsync(string suite, CancellationToken ct)
+    {
+        var dbCases = await caseStore.GetBySuiteAsync(suite, ct);
+        if (dbCases.Count > 0)
+            return dbCases.Select(c => new GoldenItem(c.Name, c.UserMessage, c.ReferenceAnswer)).ToList();
+
+        return LoadGolden();
+    }
+
     private static List<GoldenItem> LoadGolden()
     {
         if (!File.Exists(GoldenPath)) return new();
@@ -93,3 +203,4 @@ internal sealed class EvaluationHarness(
         return list;
     }
 }
+

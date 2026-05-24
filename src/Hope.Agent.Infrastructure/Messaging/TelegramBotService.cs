@@ -36,6 +36,32 @@ internal sealed class TelegramBotService(
 
         bot.OnMessage += async (msg, _) =>
         {
+            if (msg.Voice is { } voice)
+            {
+                await using var scope = scopes.CreateAsyncScope();
+                var stt = scope.ServiceProvider.GetService<Hope.Agent.Application.Voice.ISpeechToText>();
+                if (stt is null)
+                {
+                    try { await bot.SendMessage(msg.Chat.Id, "Voice messages are not enabled.", cancellationToken: stoppingToken); }
+                    catch { /* best effort */ }
+                    return;
+                }
+                try
+                {
+                    using var ms = new MemoryStream();
+                    await bot.GetInfoAndDownloadFile(voice.FileId, ms, stoppingToken);
+                    ms.Position = 0;
+                    var tr = await stt.TranscribeAsync(ms, voice.MimeType ?? "audio/ogg", "vi", stoppingToken);
+                    if (!string.IsNullOrWhiteSpace(tr.Text))
+                        await HandleMessageAsync(bot, msg, tr.Text, options, stoppingToken);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    log.LogError(ex, "Telegram: voice transcription failed.");
+                }
+                return;
+            }
             if (msg.Text is null) return;
             await HandleMessageAsync(bot, msg, msg.Text, options, stoppingToken);
         };
@@ -71,13 +97,25 @@ internal sealed class TelegramBotService(
         {
             await using var scope = scopes.CreateAsyncScope();
             var runtime = scope.ServiceProvider.GetRequiredService<IAgentRuntime>();
+            var slash = scope.ServiceProvider.GetRequiredService<Hope.Agent.Application.SlashCommands.ISlashCommandRouter>();
+            var prefs = scope.ServiceProvider.GetRequiredService<Hope.Agent.Application.Personalization.IUserPreferenceStore>();
 
             // Map Telegram user ID to a deterministic Guid for agent runtime session tracking.
             var userId = msg.From?.Id is long tid ? DeriveAgentUserId(tid) : Guid.Empty;
             var corrId = $"tg:{msg.MessageId}:{chatId}";
 
+            var slashResult = await slash.TryHandleAsync(userId, null, "telegram", text, ct);
+            if (slashResult.Handled)
+            {
+                await bot.SendMessage(chatId, slashResult.Reply, cancellationToken: ct);
+                return;
+            }
+
+            var pref = await prefs.GetAsync(userId, ct);
+            var profile = pref?.AgentProfile ?? options.AgentProfile;
+
             var response = await runtime.RunAsync(
-                new AgentRequest(userId, null, text, options.AgentProfile, corrId),
+                new AgentRequest(userId, null, text, profile, corrId),
                 ct);
 
             var reply = response.Reply.Length > options.MaxReplyLength

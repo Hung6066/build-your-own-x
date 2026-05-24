@@ -62,4 +62,42 @@ public static class HopeMeters
 
     public static readonly Counter<long> KgRelationsIngested =
         Meter.CreateCounter<long>("hope_kg_relations_total", description: "Knowledge-graph relations written by extraction pipeline.");
+    public static readonly Counter<long> ToolApprovalsRequested =
+        Meter.CreateCounter<long>("hope_tool_approvals_requested_total", description: "Tool invocations that required human approval, by tool and impact level.");
+
+    public static readonly Counter<long> ToolApprovalsGranted =
+        Meter.CreateCounter<long>("hope_tool_approvals_granted_total", description: "Tool approval decisions that allowed execution.");
+
+    public static readonly Counter<long> ToolApprovalsDenied =
+        Meter.CreateCounter<long>("hope_tool_approvals_denied_total", description: "Tool approval decisions that blocked execution.");
+
+    public static readonly Counter<long> ToolApprovalsTimedOut =
+        Meter.CreateCounter<long>("hope_tool_approvals_timed_out_total", description: "Tool approval requests that defaulted to deny after timeout.");
+
+    public static readonly Counter<long> SlashCommandsExecuted =
+        Meter.CreateCounter<long>("hope_slash_commands_total", description: "Slash commands handled before agent runtime, by command name.");
+
+    public static readonly Counter<long> ConversationsCompressed =
+        Meter.CreateCounter<long>("hope_conversations_compressed_total", description: "Conversations whose older turns were LLM-summarized in place.");
+
+    public static readonly Counter<long> UserModelExtractions =
+        Meter.CreateCounter<long>("hope_user_model_extractions_total", description: "Per-user trait extraction passes that produced a snapshot.");
+
+    public static readonly Counter<long> SessionSummariesGenerated =
+        Meter.CreateCounter<long>("hope_session_summaries_total", description: "Weekly session summaries written by the insights summarizer.");
+
+    public static readonly Counter<long> SkillsRevised =
+        Meter.CreateCounter<long>("hope_skill_revisions_total", description: "Learned-skill templates revised by the self-improvement loop.");
+
+    public static readonly Counter<long> SubagentFanOuts =
+        Meter.CreateCounter<long>("hope_subagent_fanouts_total", description: "Parallel sub-agent fan-out invocations.");
+
+    public static readonly Counter<long> SpeechTranscribed =
+        Meter.CreateCounter<long>("hope_speech_transcribed_total", description: "Audio inputs successfully transcribed.");
+
+    public static readonly Counter<long> SpeechSynthesized =
+        Meter.CreateCounter<long>("hope_speech_synthesized_total", description: "Text-to-speech responses generated.");
+
+    public static readonly Counter<long> TrajectoriesExported =
+        Meter.CreateCounter<long>("hope_trajectories_exported_total", description: "Conversation trajectories exported to JSONL for fine-tuning.");
 }

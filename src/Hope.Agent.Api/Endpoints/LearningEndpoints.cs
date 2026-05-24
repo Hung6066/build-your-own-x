@@ -71,6 +71,83 @@ public static class LearningEndpoints
             return Results.Ok(run);
         });
 
+        // ── Trend analysis ──────────────────────────────────────────────────────
+        grp.MapGet("/eval/trend", async (
+            [FromQuery] string? suite,
+            [FromQuery] int? days,
+            [FromServices] IEvaluationHarness harness,
+            CancellationToken ct) =>
+        {
+            var trend = await harness.GetTrendAsync(suite ?? "default", days ?? 30, ct);
+            return Results.Ok(trend);
+        }).WithSummary("Score trend over time — use to verify the agent is improving.");
+
+        // ── Elo leaderboard ─────────────────────────────────────────────────────
+        grp.MapGet("/eval/leaderboard", async (
+            [FromQuery] string? suite,
+            [FromQuery] int? take,
+            [FromServices] IEvaluationHarness harness,
+            CancellationToken ct) =>
+        {
+            var board = await harness.GetLeaderboardAsync(suite ?? "default", take ?? 20, ct);
+            return Results.Ok(board);
+        }).WithSummary("Completed runs ranked by Elo — higher = smarter agent version.");
+
+        grp.MapPost("/eval/tournament", async (
+            [FromQuery] string? suite,
+            [FromServices] IEvaluationHarness harness,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                var result = await harness.RunEloTournamentAsync(suite ?? "default", ct);
+                return Results.Ok(result);
+            }
+            catch (InvalidOperationException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        }).WithSummary("Co-Scientist-style Elo tournament between the two most recent runs.");
+
+        // ── Eval case management ────────────────────────────────────────────────
+        grp.MapGet("/eval/cases", async (
+            [FromQuery] string? suite,
+            [FromServices] IEvalCaseStore cases,
+            CancellationToken ct) =>
+        {
+            var list = await cases.GetBySuiteAsync(suite ?? "default", ct);
+            return Results.Ok(list);
+        });
+
+        grp.MapPost("/eval/cases", async (
+            [FromBody] AddEvalCaseRequest req,
+            [FromServices] IEvalCaseStore cases,
+            CancellationToken ct) =>
+        {
+            var c = new Hope.Agent.Domain.Learning.EvalCase
+            {
+                Id = Guid.CreateVersion7(),
+                Suite = req.Suite ?? "default",
+                Name = req.Name,
+                UserMessage = req.UserMessage,
+                ReferenceAnswer = req.ReferenceAnswer,
+                Tags = req.Tags,
+                Active = true,
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
+            var saved = await cases.AddAsync(c, ct);
+            return Results.Created($"/v1/learning/eval/cases/{saved.Id}", saved);
+        });
+
+        grp.MapDelete("/eval/cases/{id:guid}", async (
+            Guid id,
+            [FromServices] IEvalCaseStore cases,
+            CancellationToken ct) =>
+        {
+            var deleted = await cases.DeleteAsync(id, ct);
+            return deleted ? Results.NoContent() : Results.NotFound();
+        });
+
         return app;
     }
 
@@ -90,3 +167,10 @@ public sealed record FeedbackRequest(
     string? Model = null,
     string? Intent = null,
     Guid? UserId = null);
+
+public sealed record AddEvalCaseRequest(
+    string Name,
+    string UserMessage,
+    string ReferenceAnswer,
+    string? Suite = null,
+    string? Tags = null);

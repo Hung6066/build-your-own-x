@@ -23,6 +23,15 @@ file liên quan và bảng cơ sở dữ liệu.
 11. [Configuration Reference](#11-configuration-reference)
 12. [Database Schema](#12-database-schema)
 13. [Migration Commands](#13-migration-commands)
+14. [Tích hợp HIS/EHR](#14-tích-hợp-vào-hệ-thống-bệnh-viện-hisher-integration)
+15. [Cách viết Agent Tool mới](#15-cách-viết-agent-tool-mới)
+16. [Agent Control Flow](#16-agent-control-flow--so-sánh-với-openai-agents-sdk--crewai)
+17. [Model Context Protocol (MCP)](#17-model-context-protocol-mcp)
+18. [Phase 9 — MCP Integration](#18-phase-9--model-context-protocol-integration)
+19. [Phase 10 — Multi-Channel Gateway (Zalo · Slack · Email)](#19-phase-10--multi-channel-gateway-zalo--slack--email)
+20. [Phase 11 — Advanced Learning & UX](#20-phase-11--advanced-learning--ux-user-model--insights--slash--compression)
+21. [Phase 12 — Subagents · Voice · Trajectory Export](#21-phase-12--parallel-subagents--voice--trajectory-export)
+22. [Phase 13 — Operational Maturity](#22-phase-13--operational-maturity-kanban--clinical-context--migration--doctor-cli)
 
 ---
 
@@ -771,11 +780,11 @@ Neo4j nodes: `:Entity`, relationships: `:REL`
 
 Phase 8 mở rộng kênh tiếp cận Hope.Agent ra ngoài REST API:
 
-| Feature                    | Mô tả                                                                              | File                                            |
-| -------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------- |
-| **Telegram Bot**           | Nhân viên y tế hỏi qua điện thoại — không cần mở trình duyệt                       | `Infrastructure/Messaging/TelegramBotService.cs` |
-| **Scheduled Agent Tasks**  | Tự động chạy agent theo lịch UTC (hàng ngày, theo ngày trong tuần)                 | `Infrastructure/Scheduling/ScheduledAgentTaskRunner.cs` |
-| **Webhook Trigger (HIS)**  | HIS/EMR gửi sự kiện HMAC-signed → Hope.Agent khởi động Temporal workflow tức thì   | `Api/Endpoints/WebhookEndpoints.cs`             |
+| Feature                   | Mô tả                                                                            | File                                                    |
+| ------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| **Telegram Bot**          | Nhân viên y tế hỏi qua điện thoại — không cần mở trình duyệt                     | `Infrastructure/Messaging/TelegramBotService.cs`        |
+| **Scheduled Agent Tasks** | Tự động chạy agent theo lịch UTC (hàng ngày, theo ngày trong tuần)               | `Infrastructure/Scheduling/ScheduledAgentTaskRunner.cs` |
+| **Webhook Trigger (HIS)** | HIS/EMR gửi sự kiện HMAC-signed → Hope.Agent khởi động Temporal workflow tức thì | `Api/Endpoints/WebhookEndpoints.cs`                     |
 
 ---
 
@@ -786,7 +795,7 @@ Phase 8 mở rộng kênh tiếp cận Hope.Agent ra ngoài REST API:
 ```mermaid
 flowchart TD
     STAFF["Nhân viên y tế\n(Telegram mobile)"] -->|Text message| TG_CLOUD["Telegram Cloud"]
-    TG_CLOUD -->|Long polling\n(TelegramBotClient v22)| BOT["TelegramBotService\n(BackgroundService)"]
+    TG_CLOUD -->|"Long polling (TelegramBotClient v22)"| BOT["TelegramBotService\n(BackgroundService)"]
     BOT --> AUTH{"Chat ID\ntrong AllowedChatIds?"}
     AUTH -->|No| REJECT["Gửi: Unauthorized"]
     AUTH -->|Yes| SCOPE["IServiceScope\nIAgentRuntime.RunAsync"]
@@ -794,7 +803,7 @@ flowchart TD
     ORC --> LLM & TOOLS & RAG
     ORC --> SCOPE
     SCOPE --> BOT
-    BOT -->|bot.SendMessage\n(≤3000 chars)| TG_CLOUD
+    BOT -->|"bot.SendMessage (max 3000 chars)"| TG_CLOUD
     TG_CLOUD --> STAFF
 ```
 
@@ -817,11 +826,11 @@ flowchart TD
 
 #### Telegram.Bot v22 API notes
 
-| v21 (cũ)             | v22 (hiện tại)                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------- |
-| `GetMeAsync()`       | `GetMe(ct)`                                                                           |
-| `SendTextMessageAsync()` | `SendMessage(chatId, text, cancellationToken: ct)`                               |
-| Manual `GetUpdatesAsync` loop | `bot.OnMessage += async (msg, _) => { ... }` (constructor polling)         |
+| v21 (cũ)                      | v22 (hiện tại)                                                     |
+| ----------------------------- | ------------------------------------------------------------------ |
+| `GetMeAsync()`                | `GetMe(ct)`                                                        |
+| `SendTextMessageAsync()`      | `SendMessage(chatId, text, cancellationToken: ct)`                 |
+| Manual `GetUpdatesAsync` loop | `bot.OnMessage += async (msg, _) => { ... }` (constructor polling) |
 
 #### Lấy Chat ID
 
@@ -873,7 +882,14 @@ flowchart TD
       {
         "Name": "morning-or-briefing",
         "TimeUtc": "00:00",
-        "DaysOfWeek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+        "DaysOfWeek": [
+          "Monday",
+          "Tuesday",
+          "Wednesday",
+          "Thursday",
+          "Friday",
+          "Saturday"
+        ],
         "Prompt": "Hãy tóm tắt lịch phòng mổ hôm nay {date} ({dow}) và các ca nhập viện đang chờ xử lý.",
         "AgentProfile": "clinical-mobile"
       }
@@ -882,10 +898,10 @@ flowchart TD
 }
 ```
 
-| Placeholder | Giá trị                      |
-| ----------- | ---------------------------- |
-| `{date}`    | `yyyy-MM-dd` (UTC run date)  |
-| `{dow}`     | `Monday`, `Tuesday`, v.v.    |
+| Placeholder | Giá trị                     |
+| ----------- | --------------------------- |
+| `{date}`    | `yyyy-MM-dd` (UTC run date) |
+| `{dow}`     | `Monday`, `Tuesday`, v.v.   |
 
 > **Double-fire protection:** `_lastRun` dictionary (`Dictionary<string, DateOnly>`) ngăn task chạy 2 lần trong cùng một ngày dù có nhiều ticks khớp.
 
@@ -975,12 +991,12 @@ requests.post(
 
 #### Bảo mật
 
-| Đặc điểm                         | Cơ chế                                                              |
-| --------------------------------- | ------------------------------------------------------------------- |
-| Không cần JWT Bearer               | Webhook là server-to-server; HMAC thay thế JWT                     |
-| Constant-time comparison           | `CryptographicOperations.FixedTimeEquals` — chống timing attack     |
-| Secret chưa cấu hình              | `Secret = ""` → reject **tất cả** request (safe default)           |
-| Replay attack                      | HIS nên thêm timestamp trong payload và Hope.Agent validate age     |
+| Đặc điểm                 | Cơ chế                                                          |
+| ------------------------ | --------------------------------------------------------------- |
+| Không cần JWT Bearer     | Webhook là server-to-server; HMAC thay thế JWT                  |
+| Constant-time comparison | `CryptographicOperations.FixedTimeEquals` — chống timing attack |
+| Secret chưa cấu hình     | `Secret = ""` → reject **tất cả** request (safe default)        |
+| Replay attack            | HIS nên thêm timestamp trong payload và Hope.Agent validate age |
 
 #### Cấu hình
 
@@ -996,21 +1012,21 @@ requests.post(
 
 ### Files liên quan Phase 8
 
-| File                                                                          | Vai trò                                                  |
-| ----------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `src/Hope.Agent.Infrastructure/Messaging/TelegramBotOptions.cs`               | Config model Telegram bot                                |
-| `src/Hope.Agent.Infrastructure/Messaging/TelegramBotService.cs`               | BackgroundService long-polling Telegram.Bot v22          |
-| `src/Hope.Agent.Infrastructure/Scheduling/ScheduledTaskOptions.cs`            | Config model scheduled tasks                             |
-| `src/Hope.Agent.Infrastructure/Scheduling/ScheduledAgentTaskRunner.cs`        | BackgroundService chạy agent theo UTC schedule           |
-| `src/Hope.Agent.Api/Endpoints/WebhookEndpoints.cs`                            | `POST /v1/webhooks/events` + HMAC validation             |
-| `src/Hope.Agent.Infrastructure/DependencyInjection.cs`                        | Register TelegramBotService, ScheduledAgentTaskRunner    |
-| `src/Hope.Agent.Api/Program.cs`                                               | `MapWebhookEndpoints()` + `Configure<WebhookOptions>`    |
+| File                                                                   | Vai trò                                               |
+| ---------------------------------------------------------------------- | ----------------------------------------------------- |
+| `src/Hope.Agent.Infrastructure/Messaging/TelegramBotOptions.cs`        | Config model Telegram bot                             |
+| `src/Hope.Agent.Infrastructure/Messaging/TelegramBotService.cs`        | BackgroundService long-polling Telegram.Bot v22       |
+| `src/Hope.Agent.Infrastructure/Scheduling/ScheduledTaskOptions.cs`     | Config model scheduled tasks                          |
+| `src/Hope.Agent.Infrastructure/Scheduling/ScheduledAgentTaskRunner.cs` | BackgroundService chạy agent theo UTC schedule        |
+| `src/Hope.Agent.Api/Endpoints/WebhookEndpoints.cs`                     | `POST /v1/webhooks/events` + HMAC validation          |
+| `src/Hope.Agent.Infrastructure/DependencyInjection.cs`                 | Register TelegramBotService, ScheduledAgentTaskRunner |
+| `src/Hope.Agent.Api/Program.cs`                                        | `MapWebhookEndpoints()` + `Configure<WebhookOptions>` |
 
 ### Packages mới Phase 8
 
-| Package          | Version    | Dùng cho                  |
-| ---------------- | ---------- | ------------------------- |
-| `Telegram.Bot`   | 22.10.0.1  | TelegramBotService polling |
+| Package        | Version   | Dùng cho                   |
+| -------------- | --------- | -------------------------- |
+| `Telegram.Bot` | 22.10.0.1 | TelegramBotService polling |
 
 ---
 
@@ -1119,7 +1135,14 @@ flowchart LR
       {
         "Name": "morning-or-briefing",
         "TimeUtc": "00:00",
-        "DaysOfWeek": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"],
+        "DaysOfWeek": [
+          "Monday",
+          "Tuesday",
+          "Wednesday",
+          "Thursday",
+          "Friday",
+          "Saturday"
+        ],
         "Prompt": "Hãy tóm tắt lịch phòng mổ hôm nay {date} ({dow}) và các ca nhập viện đang chờ xử lý.",
         "AgentProfile": "clinical-mobile"
       }
@@ -1283,6 +1306,22 @@ dotnet ef migrations add Phase7_ShadowAdversarial `
   -s src/Hope.Agent.Api
 
 # Phase 8 — Telegram / Scheduled / Webhook (không có bảng DB mới)
+
+# Phase 9 — MCP integration (không có bảng DB mới)
+
+# Phase 10 — Multi-channel gateway (không có bảng DB mới)
+
+# Phase 11 — Advanced Learning & UX (user_traits, user_preferences, session_summaries, conversation_summaries)
+dotnet ef migrations add Phase11_LearningUx `
+  -p src/Hope.Agent.Infrastructure `
+  -s src/Hope.Agent.Api
+
+# Phase 12 — Voice + Subagents + Trajectory (không có bảng DB mới — chỉ bổ sung index)
+
+# Phase 13 — Kanban task store
+dotnet ef migrations add Phase13_Kanban `
+  -p src/Hope.Agent.Infrastructure `
+  -s src/Hope.Agent.Api
 
 # Áp dụng tất cả migrations
 dotnet ef database update `
@@ -2244,3 +2283,479 @@ builder.Services.AddAuthorization(o =>
          .RequireClaim("scope", "hope-agent:mcp"));
 });
 ```
+
+---
+
+## 18. Phase 9 — Model Context Protocol Integration
+
+Phase 9 đã được tài liệu chi tiết tại **section 17 (Model Context Protocol)** ở trên. Tóm tắt:
+
+| Thành phần                                 | Vai trò                                                                                                                                                             |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `McpToolDiscoveryService` (IHostedService) | Khi app khởi động, kết nối tới mỗi MCP server trong `Mcp:Servers`, gọi `ListToolsAsync()`, đăng ký từng tool như `McpToolAdapter` vào `IToolRegistry`.              |
+| `McpToolAdapter`                           | Adapter cài `IAgentTool`: mỗi lần LLM gọi tool, adapter forward sang `IMcpClient.CallToolAsync(...)` trên server gốc.                                               |
+| `app.MapMcp("/mcp")`                       | Expose Hope.Agent như một MCP server cho Claude Desktop / VS Code Copilot, bảo vệ bằng policy `McpPolicy` (scope `hope-agent:mcp`) + rate-limit `mcp` (30 req/min). |
+
+**Bảng cấu hình**:
+
+```json
+"Mcp": {
+  "RateLimitPerMinute": 30,
+  "Servers": [
+    { "Name": "his-mcp", "Transport": "sse", "Endpoint": "https://his.hospital.vn/mcp", "Optional": true },
+    { "Name": "lab-mcp", "Transport": "stdio", "Command": "node", "Args": ["/opt/lab-mcp/index.js"], "Optional": true }
+  ]
+}
+```
+
+**Vì sao Phase 9 quan trọng**: cho phép Hope.Agent vừa **tiêu thụ** tools từ HIS/LIS/EHR đã có MCP, vừa **xuất** tools nội bộ cho client AI khác — tránh viết lại bridge code mỗi lần thêm hệ thống mới.
+
+---
+
+## 19. Phase 10 — Multi-Channel Gateway (Zalo · Slack · Email)
+
+Mục tiêu: cho phép bác sĩ và y tá tương tác với Hope.Agent qua nhiều kênh ngoài Telegram (Phase 8) và Web. Mọi kênh đều đi qua cùng một `AgentOrchestrator`, nên trải nghiệm và policy bảo mật giống hệt nhau.
+
+### Sơ đồ luồng
+
+```mermaid
+flowchart LR
+    ZALO[Zalo OA webhook] --> ROUTER
+    SLACK[Slack Events API] --> ROUTER
+    EMAIL[(IMAP poll / SMTP send)] --> ROUTER
+    ROUTER[ChannelMessageRouter] --> SHIELD[Prompt Shield] --> ORCH[AgentOrchestrator]
+    ORCH --> ROUTER
+    ROUTER -->|Zalo OA API| ZALO
+    ROUTER -->|chat.postMessage| SLACK
+    ROUTER -->|SMTP relay| EMAIL
+```
+
+### Thành phần code
+
+| File                                            | Vai trò                                                                         |
+| ----------------------------------------------- | ------------------------------------------------------------------------------- |
+| `Application/Channels/IExternalChannel.cs`      | Abstraction: `Name`, `SendAsync(channelId, text, ct)`.                          |
+| `Application/Channels/IChannelMessageRouter.cs` | Nhận inbound message từ webhook → gọi orchestrator → trả lời lại đúng kênh gốc. |
+| `Infrastructure/Channels/ChannelRegistry.cs`    | DI registry; resolve channel theo tên.                                          |
+| `Infrastructure/Channels/Zalo/ZaloChannel.cs`   | HMAC verify webhook signature, gọi `https://openapi.zalo.me/v3.0/oa/message`.   |
+| `Infrastructure/Channels/Slack/SlackChannel.cs` | Verify `X-Slack-Signature` (v0 HMAC), gọi `chat.postMessage`.                   |
+| `Infrastructure/Channels/Email/EmailChannel.cs` | `MailKit` SMTP submit (StartTLS), tùy chọn IMAP poll cho inbound.               |
+| `Api/Endpoints/ChannelEndpoints.cs`             | `POST /v1/channels/zalo/webhook`, `POST /v1/channels/slack/events`.             |
+
+### Hardening rules đã enforce trong code
+
+- **HMAC bắt buộc** cho cả Zalo và Slack — request không khớp signature ⇒ trả 403, không log raw body (chỉ log hash).
+- **Slack request skew** mặc định 300s (`MaxRequestSkewSeconds`) để chống replay attack.
+- **Allowlist channel/sender id** — message từ chat không có trong `AllowedSenderIds` / `AllowedChannelIds` bị từ chối. Mặc định danh sách rỗng nghĩa là **kênh tắt cho tới khi vận hành whitelist**.
+- **MaxReplyLength** giới hạn cứng tránh OOM hoặc spam reply.
+- **PromptShield** chạy trước `AgentOrchestrator` đúng pipeline như Telegram.
+
+### Cấu hình `appsettings.json` (đoạn `Channels`)
+
+```json
+"Channels": {
+  "Zalo": {
+    "Enabled": false,
+    "AppSecret": "",
+    "OaAccessToken": "",
+    "AllowedSenderIds": [],
+    "AgentProfile": "clinical-mobile",
+    "MaxReplyLength": 2000
+  },
+  "Slack": {
+    "Enabled": false,
+    "SigningSecret": "",
+    "BotToken": "",
+    "AllowedChannelIds": [],
+    "MaxRequestSkewSeconds": 300
+  },
+  "Email": {
+    "Enabled": false,
+    "SmtpHost": "", "SmtpPort": 587, "UseStartTls": true,
+    "Username": "", "Password": "",
+    "FromAddress": "", "FromDisplayName": "Hope Agent",
+    "TimeoutSeconds": 15
+  }
+}
+```
+
+### Cách bật một kênh mới
+
+1. Đặt `Enabled: true`, điền secret + allowlist.
+2. Đối với Zalo/Slack: cấu hình webhook URL ở dashboard nhà cung cấp trỏ về `/v1/channels/zalo/webhook` (hoặc Slack).
+3. Test inbound bằng curl giả signature hợp lệ; nếu bị 403 ⇒ check skew / signing secret.
+4. Quan sát metric `hope_channel_messages_total{channel=...,direction=in|out}` trên Grafana.
+
+---
+
+## 20. Phase 11 — Advanced Learning & UX (User Model · Insights · Slash · Compression)
+
+Phase 11 đưa Hope.Agent từ "trợ lý reactive" lên "trợ lý hiểu user" — agent biết bác sĩ A thích trả lời ngắn, là chuyên khoa Tim mạch, đang theo dõi 3 case khó, và cứ 7 ngày tự tổng hợp một báo cáo cá nhân.
+
+### 20.1 UserModelService — Honcho-style trait extraction
+
+| Thành phần                                             | Vai trò                                                                                                                              |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `Application/UserModeling/IUserModelService.cs`        | `GetAsync(userId)` trả `UserTraitsSnapshot`; `TryExtractAsync(userId, conversationId)` chạy LLM extraction bất đồng bộ sau mỗi conv. |
+| `Infrastructure/UserModeling/LlmUserModelService.cs`   | Gọi LLM với prompt "extract role, specialty, communication style, recurring topics", lưu vào bảng `user_traits` + cache Redis.       |
+| `Infrastructure/UserModeling/EfUserPreferenceStore.cs` | Lưu các trait đã chuẩn hóa (role, specialty, language, response-length…).                                                            |
+| `AgentOrchestrator.BuildMessages(...)`                 | Khi build context: nếu `traits.IsEmpty == false`, thêm `system` message với `traits.ToSystemPromptFragment()`.                       |
+
+**Trigger**: sau mỗi `RunAsync`, orchestrator spawn fire-and-forget task `userModel.TryExtractAsync(...)` — extraction chạy ngoài request path để không tăng latency.
+
+**Privacy**: trait được lưu **theo userId nội bộ**, không lưu raw PHI. Audit log ghi `user_model.updated` event.
+
+### 20.2 SessionInsights — báo cáo cá nhân định kỳ
+
+| Thành phần                    | Vai trò                                                                                                              |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `SessionInsightHostedService` | Cron mỗi `IntervalDays` (default 7) lúc `RunHourUtc`, lấy tối đa `MaxConversationsPerSummary` conv, gọi LLM tóm tắt. |
+| `EfSessionInsightService`     | Persist vào `session_summaries` table với `tsvector` cho FTS.                                                        |
+| `GET /v1/insights?days=N`     | Trả markdown summary + top intents + top tools.                                                                      |
+
+### 20.3 ConversationCompressor — context window infinity
+
+| Thành phần                                           | Vai trò                                                                                                                                                                |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LlmConversationCompressor.MaybeCompressAsync(conv)` | Khi `conv.Messages.Count > TriggerMessageCount` (default 40), summarize các turn cũ thành 1 `system` message; giữ lại `KeepRecentMessages` (default 12) turn gần nhất. |
+| `ConversationSummary` entity                         | Lưu summary đã nén vào table `conversation_summaries` (key = ConversationId).                                                                                          |
+| `BuildMessages` integration                          | Trước skill/memory injection, nếu `compression is not null` ⇒ thêm `system` message "Earlier-conversation summary (compressed N older turns)…".                        |
+
+Kết quả: agent có thể chạy conversation 200+ turns mà vẫn nằm gọn trong context window 8k.
+
+### 20.4 Skill self-improvement loop
+
+| Thành phần                          | Vai trò                                                                                                                                           |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SkillSelfImprovementHostedService` | Mỗi `IntervalHours` (default 24), quét `LearnedSkills` có `Reward < RewardThreshold` và `UsageCount >= MinUsage`.                                 |
+| Quy trình                           | (1) Gather feedback samples → (2) LLM judge phân tích lý do reward thấp → (3) LLM revise `AnswerTemplate` → (4) Ghi đè skill, reset reward = 0.5. |
+| Cap                                 | `MaxRevisionsPerRun` (default 20) để tránh vòng lặp burn API.                                                                                     |
+
+### 20.5 Slash commands
+
+`ISlashCommandRouter` parse message bắt đầu bằng `/`. Handler hiện có:
+
+| Command                   | Handler              | Hành vi                                                   |
+| ------------------------- | -------------------- | --------------------------------------------------------- |
+| `/help`                   | `HelpCommand`        | Liệt kê tất cả command.                                   |
+| `/personality cardiology` | `PersonalityCommand` | Đổi `AgentProfile` mid-conversation, không phá session.   |
+| `/model openai gpt-4o`    | `ModelCommand`       | Force route sang provider/model cụ thể (override bandit). |
+| `/undo`                   | `UndoCommand`        | Xóa 2 message gần nhất (user + assistant) để retry.       |
+| `/compress`               | `CompressCommand`    | Force `ConversationCompressor` chạy ngay.                 |
+| `/whoami`                 | `WhoamiCommand`      | Show traits + preferences đang biết về user (debug UX).   |
+
+### Cấu hình tổng (Phase 11)
+
+```json
+"UserModel": { "Enabled": false, "ExtractEveryTurns": 10, "RecentTurnsWindow": 30 },
+"SessionInsights": { "Enabled": false, "IntervalDays": 7, "RunHourUtc": 2, "MaxConversationsPerSummary": 50 },
+"ConversationCompressor": { "Enabled": false, "TriggerMessageCount": 40, "KeepRecentMessages": 12 },
+"SkillSelfImprovement": { "Enabled": false, "RewardThreshold": 0.7, "MinUsage": 5, "MaxRevisionsPerRun": 20, "IntervalHours": 24, "RunHourUtc": 3 }
+```
+
+---
+
+## 21. Phase 12 — Parallel Subagents · Voice · Trajectory Export
+
+### 21.1 ISubagentPool — parallel fan-out
+
+Khác với multi-agent ChiefMedicalAgent (sequential handoff), subagent pool spawn **nhiều specialist agent song song** rồi aggregate — dùng cho differential diagnosis, second-opinion, multi-source reconciliation.
+
+```mermaid
+sequenceDiagram
+    participant USR as Bác sĩ
+    participant SUB as ISubagentPool
+    participant A1 as Cardio subagent
+    participant A2 as Endo subagent
+    participant A3 as Neuro subagent
+    participant AGG as Aggregator LLM
+
+    USR->>SUB: "Bệnh nhân nữ 55t, đau ngực + tê tay trái + đường huyết 18"
+    par
+        SUB->>A1: "Đánh giá tim mạch"
+    and
+        SUB->>A2: "Đánh giá nội tiết"
+    and
+        SUB->>A3: "Đánh giá thần kinh"
+    end
+    A1-->>SUB: kết luận + citation
+    A2-->>SUB: kết luận + citation
+    A3-->>SUB: kết luận + citation
+    SUB->>AGG: aggregation prompt + 3 ý kiến
+    AGG-->>USR: tổng hợp + note phân kỳ ý kiến
+```
+
+| Cấu hình                            | Default           | Ý nghĩa                                                               |
+| ----------------------------------- | ----------------- | --------------------------------------------------------------------- |
+| `Subagents:Enabled`                 | `false`           | Bật tính năng.                                                        |
+| `Subagents:MaxParallelism`          | `5`               | Số subagent chạy song song tối đa (cap để bảo vệ rate-limit LLM).     |
+| `Subagents:PerBranchTimeoutSeconds` | `60`              | Mỗi nhánh timeout độc lập; nhánh chết không kéo theo cả request.      |
+| `Subagents:AggregationPrompt`       | (xem appsettings) | System prompt cho LLM aggregator — nhấn mạnh ghi rõ **disagreement**. |
+
+**Endpoint**: `POST /v1/subagents/run` với body `{ task, profiles: ["cardiology","endocrinology",...] }`.
+
+### 21.2 Voice in / Voice out (Speech)
+
+| Thành phần                                     | Vai trò                                                                                                                |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `Application/Speech/ISpeechService.cs`         | `TranscribeAsync(stream)` (STT) và `SynthesizeAsync(text)` (TTS).                                                      |
+| `Infrastructure/Speech/OpenAiSpeechService.cs` | Provider OpenAI: `whisper-1` cho STT, `tts-1` cho TTS.                                                                 |
+| `Api/Endpoints/VoiceEndpoints.cs`              | `POST /v1/voice/transcribe` (multipart audio), `POST /v1/voice/synthesize` (JSON `{text, voice}`).                     |
+| Telegram integration                           | `TelegramBotService` khi gặp voice message ⇒ download → `TranscribeAsync` → đẩy text vào orchestrator như bình thường. |
+
+**Tham số**: `Speech:Provider`, `BaseUrl`, `ApiKey`, `SttModel`, `TtsModel`, `TtsVoice` (`alloy|nova|echo|fable|onyx|shimmer`), `TtsFormat` (`mp3|opus|aac|flac`).
+
+**Use-case lâm sàng**: y tá tại buồng bệnh ghi voice memo trên điện thoại → Telegram → STT → agent gợi ý chẩn đoán → TTS đọc lại tại loa phòng trực.
+
+### 21.3 Web dashboard (Blazor)
+
+| Endpoint                      | Mô tả                                                             |
+| ----------------------------- | ----------------------------------------------------------------- |
+| `GET /v1/dashboard/overview`  | KPI tổng: số conv hôm nay, tỉ lệ block, win rate challenger.      |
+| `GET /v1/dashboard/approvals` | Queue tool đang chờ approve (cùng nguồn với `IToolApprovalGate`). |
+| `GET /v1/dashboard/skills`    | Top skills theo reward + usage.                                   |
+
+UI nằm trong project `Hope.Agent.Web` (Blazor Server), reuse `NotificationsHub` SignalR sẵn có để live-update queue approval.
+
+### 21.4 Trajectory Export — fine-tune dataset
+
+| Thành phần                                    | Vai trò                                                                                                                                     |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Application/Training/ITrajectoryExporter.cs` | `ExportAsync(maxConversations, ct)` trả `IAsyncEnumerable<TrajectoryRecord>`.                                                               |
+| `EfTrajectoryExporter`                        | Join `Conversations` + `Messages` + `ToolExecutions` + `AuditEvents`, PHI-redact qua `IPhiRedactor`, output JSONL theo schema SFT-friendly. |
+| `Api/Endpoints/TrainingEndpoints.cs`          | `GET /v1/training/trajectories?max=500` stream JSONL.                                                                                       |
+
+**Output schema** (per line):
+
+```json
+{
+  "conversation_id": "0193…",
+  "messages": [
+    {"role":"system","content":"…"},
+    {"role":"user","content":"…[PHI-redacted]"},
+    {"role":"assistant","content":"…","tool_calls":[…]},
+    {"role":"tool","name":"patient_lookup","content":"…"}
+  ],
+  "reward": 0.87,
+  "judge_score": 0.92
+}
+```
+
+Dùng để fine-tune Vietnamese clinical LLM (Qwen2.5-7B, PhoGPT, v.v.) với HuggingFace TRL `SFTTrainer`.
+
+### Cấu hình tổng (Phase 12)
+
+```json
+"Subagents": { "Enabled": false, "MaxParallelism": 5, "PerBranchTimeoutSeconds": 60, "AggregationPrompt": "…" },
+"Speech": { "Enabled": false, "Provider": "openai", "BaseUrl": "https://api.openai.com/v1", "ApiKey": "", "SttModel": "whisper-1", "TtsModel": "tts-1", "TtsVoice": "alloy", "TtsFormat": "mp3", "TimeoutSeconds": 60 },
+"TrajectoryExport": { "Enabled": false, "DefaultMaxConversations": 500 }
+```
+
+---
+
+## 22. Phase 13 — Operational Maturity (Kanban · Clinical Context · Migration · Doctor CLI)
+
+Phase 13 tập trung vào ops day-2: vận hành dài hạn, đa khoa, di trú từ chatbot cũ và self-diagnosis khi triển khai mới.
+
+### 22.1 Kanban task store — gắn task lâm sàng vào EF
+
+Use-case: agent đề xuất "đặt thêm xét nghiệm CRP" → tạo Kanban card → điều dưỡng nhận card → khi kết quả về, card tự move sang `Done` và agent follow-up.
+
+| Layer          | File                                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Domain         | `Domain/Tasks/KanbanTask.cs` (`KanbanColumn` enum: `Backlog→Todo→InProgress→Blocked→Done→Cancelled`; `KanbanPriority`: `Low→Normal→High→Urgent`). |
+| Application    | `Application/Tasks/IKanbanTaskStore.cs` + `KanbanTaskFilter` + `KanbanOptions`.                                                                   |
+| Infrastructure | `Infrastructure/Tasks/EfKanbanTaskStore.cs` — CRUD + auto-set `CompletedAt` khi chuyển sang `Done`.                                               |
+| API            | `Api/Endpoints/KanbanEndpoints.cs` — group `/v1/kanban`.                                                                                          |
+
+**Bảng DB** `kanban_tasks` (Phase 13 migration):
+
+| Cột                                                | Kiểu                           | Index                     |
+| -------------------------------------------------- | ------------------------------ | ------------------------- |
+| `Id`                                               | `uuid` (v7)                    | PK                        |
+| `UserId`                                           | `uuid?` (assignee)             | yes                       |
+| `ConversationId`                                   | `uuid?` (origin)               | —                         |
+| `PatientRef`                                       | `varchar(64)?` (de-identified) | yes                       |
+| `Title`                                            | `varchar(256)`                 | —                         |
+| `Description`                                      | `text?`                        | —                         |
+| `Column`                                           | `int` (enum)                   | composite với `UpdatedAt` |
+| `Priority`                                         | `int` (enum)                   | —                         |
+| `CreatedAt`, `UpdatedAt`, `DueAt?`, `CompletedAt?` | `timestamptz`                  | —                         |
+| `AssignedTo`                                       | `varchar(128)?`                | —                         |
+| `Tags`                                             | `varchar(256)?` (CSV)          | —                         |
+
+**Endpoint**:
+
+| Method | Path              | Body / Query                                        |
+| ------ | ----------------- | --------------------------------------------------- |
+| GET    | `/v1/kanban`      | `userId?, column?, patientRef?, assignedTo?, take?` |
+| GET    | `/v1/kanban/{id}` | —                                                   |
+| POST   | `/v1/kanban`      | `KanbanCreateRequest` (title bắt buộc)              |
+| PATCH  | `/v1/kanban/{id}` | `KanbanUpdateRequest` (partial)                     |
+| DELETE | `/v1/kanban/{id}` | —                                                   |
+
+**Lưu ý PHI**: `PatientRef` là **de-identified ID** (MRN hash hoặc internal id) — không lưu họ tên / CCCD.
+
+### 22.2 Clinical context files — file-driven layer trên SystemPrompt
+
+Cho phép mỗi khoa có một file markdown `CLINICAL_CONTEXT.{profile}.md` chèn vào system prompt khi `AgentProfile` khớp.
+
+```text
+./context/
+├── CLINICAL_CONTEXT.md            # áp dụng cho tất cả profile (chung)
+├── CLINICAL_CONTEXT.khoa-nhi.md
+├── CLINICAL_CONTEXT.khoa-noi.md
+└── CLINICAL_CONTEXT.cardiology.md
+```
+
+| Thành phần                                              | Vai trò                                                                                                                                                             |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Application/Context/IClinicalContextProvider.cs`       | `GetAsync(profile, ct)` trả `ClinicalContextFragment?` (Profile + Content).                                                                                         |
+| `Infrastructure/Context/FileClinicalContextProvider.cs` | Đọc file, **merge default + profile-specific**, in-memory cache với TTL `CacheSeconds`.                                                                             |
+| `AgentOrchestrator`                                     | Ctor nhận `IClinicalContextProvider?` (optional). Trong `RunAsync` pre-fetch fragment, truyền vào `BuildMessages`, fragment được chèn ngay sau base `SystemPrompt`. |
+
+**Cấu hình**:
+
+```json
+"ClinicalContext": {
+  "Enabled": false,
+  "Directory": "./context",
+  "CacheSeconds": 60,
+  "MaxCharacters": 4000
+}
+```
+
+**Endpoint debug**:
+
+| Method | Path                                       | Mô tả                   |
+| ------ | ------------------------------------------ | ----------------------- |
+| GET    | `/v1/diagnostics/context?profile=khoa-nhi` | Xem fragment đã merge   |
+| GET    | `/v1/diagnostics/context/profiles`         | Liệt kê profile có file |
+
+**Mẫu file** `CLINICAL_CONTEXT.khoa-nhi.md`:
+
+```markdown
+## Context khoa Nhi
+
+- Bệnh nhân chủ yếu 0–15 tuổi; cân nặng và liều thuốc phải tính theo kg.
+- Tránh paracetamol > 60 mg/kg/ngày.
+- Khi nghi sốt xuất huyết, ưu tiên gọi tool `dengue_warning_signs_check`.
+- Ngôn ngữ: nói chuyện với phụ huynh, tránh thuật ngữ nặng.
+```
+
+### 22.3 Migration importer — `hope migrate`
+
+Nhập dữ liệu Q&A từ chatbot cũ vào `LearnedSkills` để agent dùng ngay làm seed knowledge.
+
+| Format          | Source mô tả                                                                                                                                               |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DialogflowFaq` | Dialogflow ES/CX export — hỗ trợ cả mảng phẳng `[{question, answer}]` lẫn dạng `{intents:[{displayName, trainingPhrases, messages}]}`.                     |
+| `Rasa`          | RASA NLU JSON (`rasa_nlu_data.common_examples`) — vì RASA tách response sang `responses.yml`, importer chèn template placeholder cho human để fill answer. |
+| `GenericFaq`    | Mảng `[{question, answer, intent?}]` — định dạng đơn giản nhất, khuyên dùng cho FAQ database thuần.                                                        |
+
+**Pipeline**:
+
+```mermaid
+flowchart LR
+    UPLOAD["POST /v1/migrate\nmultipart: file + source + intent? + dryRun?"]
+    UPLOAD --> PARSE{Source}
+    PARSE -->|DialogflowFaq| DF[Dialogflow parser]
+    PARSE -->|Rasa| RA[RASA parser]
+    PARSE -->|GenericFaq| GE[Generic parser]
+    DF & RA & GE --> NORM[Normalize → FaqItem array]
+    NORM --> CAP[Cap at MaxItemsPerImport]
+    CAP --> LOOP[Loop items]
+    LOOP --> SIG[Signature = SHA256 of normalized question]
+    SIG --> DUP{Exists in LearnedSkills?}
+    DUP -->|Yes| SKIP[skipped++]
+    DUP -->|No| INSERT[Insert LearnedSkill\nReward=0.5, UsageCount=0]
+    INSERT --> COUNT[imported++]
+    LOOP --> STATS[Return ImportStats]
+```
+
+**Cấu hình**:
+
+```json
+"Migration": { "Enabled": false, "MaxItemsPerImport": 5000 }
+```
+
+**Dry-run mode**: gửi `dryRun=true` để chỉ đếm số item sẽ insert/skip mà không ghi DB — nên chạy trước mọi migration thật.
+
+**Lệnh curl mẫu**:
+
+```bash
+curl -X POST https://hope.example.com/v1/migrate \
+  -H "Authorization: Bearer $HOPE_TOKEN" \
+  -F "source=GenericFaq" \
+  -F "intent=migrated-faq" \
+  -F "dryRun=true" \
+  -F "file=@./faq.json"
+```
+
+### 22.4 `hope doctor` diagnostic CLI
+
+Kiểm tra nhanh tình trạng vận hành sau khi deploy hoặc khi nghi vấn lỗi hạ tầng.
+
+| Thành phần                                       | Vai trò                                                                                                                                                                                                                                                    |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Application/Diagnostics/IDiagnosticRunner.cs`   | Contract: `RunAsync(ct)` trả `DiagnosticReport` (timestamp + `allHealthy` + list `HealthCheckResult`).                                                                                                                                                     |
+| `Infrastructure/Diagnostics/DiagnosticRunner.cs` | Lần lượt probe: PostgreSQL (`SELECT 1`), Redis (`PING`), Neo4j (`RETURN 1`), Kafka (admin `GetMetadata(3s)` đếm broker/topic), LLM (`ILLMRouter.SelectChat()` + `SelectEmbedding()`). Mỗi check có `try/catch` riêng → một check fail không kéo cả report. |
+| `Api/Endpoints/DiagnosticsEndpoints.cs`          | `GET /v1/diagnostics` trả JSON.                                                                                                                                                                                                                            |
+| `tools/hope-doctor.ps1`                          | PowerShell wrapper render bảng màu (xanh = OK, đỏ = FAIL). Exit code: `0` healthy, `3` có check fail, `1`/`2` lỗi CLI/token.                                                                                                                               |
+
+**Output mẫu**:
+
+```text
+Hope.Agent doctor — 2026-05-24T03:21:08+00:00
+────────────────────────────────────────────────────────────────
+[ OK ] postgres        12.3ms  connected
+[ OK ] redis             0.9ms  ping 0.4ms
+[ OK ] neo4j            18.7ms  connected
+[FAIL] kafka          3000.1ms  KafkaException: Local: Broker transport failure
+[ OK ] llm               0.0ms  chat=openai, embed=openai
+────────────────────────────────────────────────────────────────
+One or more checks failed.
+```
+
+**Cách dùng**:
+
+```powershell
+$env:HOPE_TOKEN = '<bearer-token>'
+pwsh ./tools/hope-doctor.ps1 -BaseUrl https://hope.example.com
+```
+
+Trong CI/CD post-deploy, chạy script và fail pipeline khi exit code ≠ 0.
+
+### 22.5 Migration EF (Phase 13)
+
+```bash
+dotnet ef migrations add Phase13_Kanban \
+  --project src/Hope.Agent.Infrastructure \
+  --startup-project src/Hope.Agent.Api
+
+dotnet ef database update \
+  --project src/Hope.Agent.Infrastructure \
+  --startup-project src/Hope.Agent.Api
+```
+
+Chỉ Kanban tạo bảng mới — clinical context dùng file system, migration importer ghi vào `LearnedSkills` đã có, diagnostics không persist.
+
+### Tóm tắt feature flags Phase 9–13
+
+| Section | Flag                             | Default | Mô tả ngắn                    |
+| ------- | -------------------------------- | ------- | ----------------------------- |
+| 19      | `Channels:Zalo:Enabled`          | `false` | Zalo OA webhook               |
+| 19      | `Channels:Slack:Enabled`         | `false` | Slack Events API              |
+| 19      | `Channels:Email:Enabled`         | `false` | SMTP send                     |
+| 20      | `UserModel:Enabled`              | `false` | Trait extraction              |
+| 20      | `SessionInsights:Enabled`        | `false` | Weekly LLM summary            |
+| 20      | `ConversationCompressor:Enabled` | `false` | Auto-compress > 40 turns      |
+| 20      | `SkillSelfImprovement:Enabled`   | `false` | Auto-revise low-reward skills |
+| 21      | `Subagents:Enabled`              | `false` | Parallel fan-out              |
+| 21      | `Speech:Enabled`                 | `false` | STT + TTS                     |
+| 21      | `TrajectoryExport:Enabled`       | `false` | SFT dataset export            |
+| 22      | `Kanban:Enabled`                 | `false` | Kanban task store             |
+| 22      | `ClinicalContext:Enabled`        | `false` | Per-khoa context files        |
+| 22      | `Migration:Enabled`              | `false` | External chatbot importer     |
+
+Tất cả tính năng Phase 9–13 mặc định **OFF**. Bật từng cái khi có nhu cầu vận hành thực tế và đã chuẩn bị credential / dataset tương ứng.

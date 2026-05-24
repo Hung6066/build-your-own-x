@@ -172,6 +172,18 @@ app.MapLearningEndpoints();
 app.MapKnowledgeEndpoints();
 app.MapShadowEndpoints();
 app.MapAdversarialEndpoints();
+app.MapApprovalEndpoints();
+app.MapChannelEndpoints();
+app.MapInsightEndpoints();
+app.MapTrainingEndpoints();
+app.MapSubagentEndpoints();
+app.MapVoiceEndpoints();
+app.MapDashboardEndpoints();
+app.MapKanbanEndpoints();
+app.MapMigrationEndpoints();
+app.MapDiagnosticsEndpoints();
+app.MapToolsEndpoints();
+app.MapResearchEndpoints();
 app.MapMcp("/mcp")
     .RequireAuthorization("McpPolicy")
     .RequireRateLimiting("mcp");  // 30 req/min (configurable via Mcp:RateLimitPerMinute)

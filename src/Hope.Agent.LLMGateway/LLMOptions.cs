@@ -34,4 +34,9 @@ public sealed class GeminiOptions
     public string ApiKey { get; set; } = string.Empty;
     public string Model { get; set; } = "gemini-2.0-flash";
     public string EmbeddingModel { get; set; } = "text-embedding-004";
+    /// <summary>
+    /// Model used by GeminiDeepResearchAgent. Defaults to gemini-2.5-flash which supports
+    /// extended thinking + grounding. Switch to "gemini-2.5-pro" for Deep Research Max quality.
+    /// </summary>
+    public string DeepResearchModel { get; set; } = "gemini-2.5-flash";
 }

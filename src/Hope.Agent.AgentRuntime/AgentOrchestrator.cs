@@ -2,12 +2,15 @@ using System.Diagnostics;
 using System.Text.Json;
 using Hope.Agent.Application.Abstractions;
 using Hope.Agent.Application.Agents;
+using Hope.Agent.Application.Compression;
+using Hope.Agent.Application.Context;
 using Hope.Agent.Application.Knowledge;
 using Hope.Agent.Application.LLM;
 using Hope.Agent.Application.Learning;
 using Hope.Agent.Application.Observability;
 using Hope.Agent.Application.Security;
 using Hope.Agent.Application.Tools;
+using Hope.Agent.Application.UserModeling;
 using Hope.Agent.Domain.Audit;
 using Hope.Agent.Domain.Conversations;
 using Hope.Agent.Domain.Learning;
@@ -46,14 +49,20 @@ internal sealed class AgentOrchestrator(
     IKnowledgeExtractor kgExtractor,
     IKnowledgeGraphStore kgStore,
     IToolRegistry tools,
+    IToolApprovalPolicy approvalPolicy,
+    IToolApprovalGate approvalGate,
+    Hope.Agent.AgentRuntime.Security.SandboxedToolExecutor sandbox,
     IConversationRepository convRepo,
     IMemoryStore memory,
+    IConversationCompressor compressor,
+    IUserModelService userModel,
     IAuditSink audit,
     IPromptShield shield,
     IPhiRedactor phi,
     IClock clock,
     IOptions<AgentRuntimeOptions> opts,
-    ILogger<AgentOrchestrator> log) : IAgentRuntime
+    ILogger<AgentOrchestrator> log,
+    IClinicalContextProvider? clinicalContext = null) : IAgentRuntime
 {
     private static readonly ActivitySource Activity = new("Hope.Agent.Runtime");
     private readonly AgentRuntimeOptions _opts = opts.Value;
@@ -96,7 +105,19 @@ internal sealed class AgentOrchestrator(
         var skillHits = _opts.EnableSkillRetrieval
             ? await SafeRetrieveSkillsAsync(intent, ct)
             : (IReadOnlyList<LearnedSkill>)Array.Empty<LearnedSkill>();
-        var messages = BuildMessages(conv, memories, skillHits);
+        UserTraitsSnapshot? traits = null;
+        try { traits = await userModel.GetAsync(request.UserId, ct); }
+        catch (Exception ex) { log.LogWarning(ex, "User-model fetch failed; ignoring"); }
+        CompressionResult? compression = null;
+        try { compression = await compressor.MaybeCompressAsync(conv, ct); }
+        catch (Exception ex) { log.LogWarning(ex, "Conversation compression failed; ignoring"); }
+        ClinicalContextFragment? clinicalFragment = null;
+        if (clinicalContext is not null)
+        {
+            try { clinicalFragment = await clinicalContext.GetAsync(request.AgentProfile, ct); }
+            catch (Exception ex) { log.LogWarning(ex, "Clinical context load failed; ignoring"); }
+        }
+        var messages = BuildMessages(conv, memories, skillHits, traits, compression, clinicalFragment);
 
         IChatCompletionProvider chat;
         RouterChoice? adaptiveChoice = null;
@@ -145,6 +166,14 @@ internal sealed class AgentOrchestrator(
 
         await convRepo.SaveChangesAsync(ct);
         await StoreEpisodicAsync(request, conv, finalContent, ct);
+
+        var convIdForExtract = conv.Id;
+        var userIdForExtract = request.UserId;
+        _ = Task.Run(async () =>
+        {
+            try { await userModel.TryExtractAsync(userIdForExtract, convIdForExtract, CancellationToken.None); }
+            catch (Exception ex) { log.LogWarning(ex, "User-model extract (background) failed"); }
+        }, CancellationToken.None);
 
         if (_opts.EnableReflection && !string.IsNullOrWhiteSpace(finalContent))
         {
@@ -216,7 +245,7 @@ internal sealed class AgentOrchestrator(
         var conv = await LoadOrCreateConversationAsync(request, now, ct);
         conv.AddMessage(MessageRole.User, request.Message, now);
         var memories = await RetrieveMemoriesAsync(request, ct);
-        var messages = BuildMessages(conv, memories, Array.Empty<LearnedSkill>());
+        var messages = BuildMessages(conv, memories, Array.Empty<LearnedSkill>(), null, null);
 
         var chat = router.SelectChat();
         var sb = new System.Text.StringBuilder();
@@ -256,9 +285,29 @@ internal sealed class AgentOrchestrator(
         }
     }
 
-    private List<ChatMessage> BuildMessages(Conversation conv, IReadOnlyList<MemorySearchHit> mems, IReadOnlyList<LearnedSkill> skills)
+    private List<ChatMessage> BuildMessages(
+        Conversation conv,
+        IReadOnlyList<MemorySearchHit> mems,
+        IReadOnlyList<LearnedSkill> skills,
+        UserTraitsSnapshot? traits = null,
+        CompressionResult? compression = null,
+        ClinicalContextFragment? clinicalFragment = null)
     {
         var list = new List<ChatMessage> { new("system", _opts.SystemPrompt) };
+        if (clinicalFragment is not null && !string.IsNullOrWhiteSpace(clinicalFragment.Content))
+        {
+            list.Add(new ChatMessage("system",
+                $"Clinical context for profile '{clinicalFragment.Profile}':\n{clinicalFragment.Content}"));
+        }
+        if (traits is { IsEmpty: false })
+        {
+            list.Add(new ChatMessage("system", traits.ToSystemPromptFragment()));
+        }
+        if (compression is not null)
+        {
+            list.Add(new ChatMessage("system",
+                $"Earlier-conversation summary (compressed {compression.CompressedMessageCount} older turns):\n{compression.Summary.Content}"));
+        }
         if (mems.Count > 0)
         {
             var memText = string.Join("\n", mems.Select((m, i) => $"[{i + 1}] ({m.Record.Kind}) {m.Record.Content}"));
@@ -270,7 +319,13 @@ internal sealed class AgentOrchestrator(
             list.Add(new ChatMessage("system", $"Patterns that worked well before for similar requests:\n{skillText}"));
             HopeMeters.SkillHits.Add(skills.Count);
         }
-        foreach (var msg in conv.Messages.OrderBy(m => m.CreatedAt))
+        IEnumerable<ConversationMessage> turns = conv.Messages.OrderBy(m => m.CreatedAt);
+        if (compression is not null)
+        {
+            // Drop the older turns covered by the summary; keep only messages newer than the cutoff.
+            turns = turns.Where(m => m.CreatedAt > compression.Summary.SummarizedUpTo);
+        }
+        foreach (var msg in turns)
         {
             var role = msg.Role switch
             {
@@ -298,7 +353,29 @@ internal sealed class AgentOrchestrator(
         try
         {
             var ctx = new ToolInvocationContext(request.UserId, conv.Id, request.CorrelationId ?? conv.Id.ToString());
-            var output = await tool.InvokeAsync(call.ArgumentsJson, ctx, ct);
+
+            var policy = approvalPolicy.Decide(call.Name, call.ArgumentsJson);
+            if (policy.Kind == ApprovalDecisionKind.AutoDeny)
+            {
+                var deny = JsonSerializer.Serialize(new { error = "tool_execution_denied", reason = policy.Reason ?? "policy_auto_deny", tool = call.Name });
+                conv.AddMessage(MessageRole.Tool, deny, clock.UtcNow, call.Name, call.Id);
+                HopeMeters.ToolApprovalsDenied.Add(1, new KeyValuePair<string, object?>("tool", call.Name), new KeyValuePair<string, object?>("reason", "policy"));
+                return (deny, new AgentToolExecution(call.Name, call.ArgumentsJson, deny, sw.Elapsed, false));
+            }
+            if (policy.Kind == ApprovalDecisionKind.RequireApproval)
+            {
+                var approval = await approvalGate.RequestAsync(
+                    new ApprovalRequestInput(conv.Id, request.UserId, call.Name, call.ArgumentsJson, policy.Impact),
+                    ct);
+                if (!approval.Approved)
+                {
+                    var deny = JsonSerializer.Serialize(new { error = "tool_execution_denied", reason = approval.Reason ?? "not_approved", status = approval.Status.ToString(), tool = call.Name });
+                    conv.AddMessage(MessageRole.Tool, deny, clock.UtcNow, call.Name, call.Id);
+                    return (deny, new AgentToolExecution(call.Name, call.ArgumentsJson, deny, sw.Elapsed, false));
+                }
+            }
+
+            var output = await sandbox.InvokeAsync(tool, call.ArgumentsJson, ctx, ct);
             conv.AddMessage(MessageRole.Tool, output, clock.UtcNow, call.Name, call.Id);
             return (output, new AgentToolExecution(call.Name, call.ArgumentsJson, output, sw.Elapsed, true));
         }

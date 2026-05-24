@@ -34,6 +34,8 @@ public sealed class EvalRun
     public int Passed { get; set; }
     public int Failed { get; set; }
     public double AvgJudgeScore { get; set; }
+    /// <summary>Elo rating updated after each pairwise tournament. Starts at 1000.</summary>
+    public double EloRating { get; set; } = 1000.0;
     public DateTimeOffset StartedAt { get; init; }
     public DateTimeOffset? FinishedAt { get; set; }
     public required string ReportJson { get; set; }
