@@ -52,11 +52,30 @@ public class EmergencyTriageWorkflow
         status = $"triaged-level-{severity}";
         stepLog.Add(status);
 
+        // ── Priority ranking via Weighted EDF scoring ────────────────────────
+        // Even for a single patient this computes a normalized priority_score that
+        // surfaces triage reasoning (severity, risk flags, resource load) on the
+        // workflow timeline and can be used for multi-patient comparisons later.
+        status = "ranking-priority";
+        var rankCtx = new Dictionary<string, string>
+        {
+            ["patient_id"] = input.PatientId.ToString(),
+            ["severity_level"] = severity.ToString(),
+            ["risk_flags"] = ExtractRiskFlags(input.Symptoms),
+        };
+        var rankDispatch = new AgentDispatchInput(
+            input.UserId, "rank_triage",
+            $"Score priority for emergency patient level {severity}", rankCtx, null, null, 1);
+        var rankResult = await Workflow.ExecuteActivityAsync(
+            (ClinicalActivities a) => a.DispatchAgentAsync(rankDispatch), actOpts);
+        var priorityScore = ExtractPriorityScore(rankResult.Output);
+        stepLog.Add($"priority-score:{priorityScore:F1}");
+
         if (severity >= 4)
         {
             var severityNotify = new NotificationActivityInput(
-                "emergency", "triage.high-severity", $"High-severity emergency (level {severity})",
-                input.Symptoms, null, new Dictionary<string, string> { ["level"] = severity.ToString() });
+                "emergency", "triage.high-severity", $"High-severity emergency (level {severity}, score {priorityScore:F0})",
+                input.Symptoms, null, new Dictionary<string, string> { ["level"] = severity.ToString(), ["priority_score"] = priorityScore.ToString("F1") });
             var notifyTask = Workflow.ExecuteActivityAsync(
                 (ClinicalActivities a) => a.NotifyAsync(severityNotify),
                 actOpts);
@@ -91,12 +110,12 @@ public class EmergencyTriageWorkflow
             await Workflow.ExecuteActivityAsync(
                 (ClinicalActivities a) => a.NotifyAsync(noShowNotify),
                 actOpts);
-            return new EmergencyTriageResult(input.PatientId, severity, "no-show", stepLog);
+            return new EmergencyTriageResult(input.PatientId, severity, priorityScore, "no-show", stepLog);
         }
 
         status = "completed";
         stepLog.Add(status);
-        return new EmergencyTriageResult(input.PatientId, severity, triage.Output, stepLog);
+        return new EmergencyTriageResult(input.PatientId, severity, priorityScore, triage.Output, stepLog);
     }
 
     [WorkflowSignal]
@@ -120,6 +139,31 @@ public class EmergencyTriageWorkflow
         }
         return 3;
     }
+
+    /// <summary>Extracts a comma-separated list of risk flag keywords from the symptom description.</summary>
+    private static string ExtractRiskFlags(string symptoms)
+    {
+        var flags = new List<string>(4);
+        var lower = symptoms.ToLowerInvariant();
+        if (lower.Contains("chest") || lower.Contains("đau ngực")) flags.Add("chest_pain");
+        if (lower.Contains("breath") || lower.Contains("khó thở")) flags.Add("oxygen_below_90");
+        if (lower.Contains("unconscious") || lower.Contains("hôn mê")) flags.Add("unconscious");
+        if (lower.Contains("stroke") || lower.Contains("đột quỵ")) flags.Add("stroke_symptoms");
+        if (lower.Contains("sepsis") || lower.Contains("nhiễm khuẩn")) flags.Add("sepsis");
+        return string.Join(",", flags);
+    }
+
+    private static double ExtractPriorityScore(string rankOutput)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(rankOutput);
+            if (doc.RootElement.TryGetProperty("priority_score", out var ps))
+                return ps.GetDouble();
+        }
+        catch { /* keep default */ }
+        return 0;
+    }
 }
 
-public sealed record EmergencyTriageResult(Guid PatientId, int Severity, string Summary, IReadOnlyList<string> Steps);
+public sealed record EmergencyTriageResult(Guid PatientId, int Severity, double PriorityScore, string Summary, IReadOnlyList<string> Steps);

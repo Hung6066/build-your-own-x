@@ -65,6 +65,10 @@ public static class DependencyInjection
 
         services.AddSingleton<IPhiRedactor, RegexPhiRedactor>();
         services.AddSingleton<IPromptShield, HeuristicPromptShield>();
+        services.AddSingleton<IOutputShield, RegexOutputShield>();
+        // NemoClaw-inspired security rails
+        services.AddSingleton<ISsrfGuard, HeuristicSsrfGuard>();
+        services.AddSingleton<IRetrievalRail, PromptShieldRetrievalRail>();
 
         services.AddScoped<IFeedbackStore, EfFeedbackStore>();
         services.AddScoped<ISkillLibrary, EfSkillLibrary>();
@@ -79,6 +83,7 @@ public static class DependencyInjection
 
         services.Configure<ToolApprovalOptions>(cfg.GetSection(ToolApprovalOptions.Section));
         services.AddSingleton<IToolApprovalPolicy, ConfigurableToolApprovalPolicy>();
+        services.AddSingleton<IToolAccessPolicy, ConfigurableToolAccessPolicy>();
         services.AddSingleton<IToolApprovalGate, SignalRApprovalGate>();
         services.AddScoped<IToolApprovalRequestStore, EfToolApprovalRequestStore>();
 

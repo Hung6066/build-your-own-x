@@ -1,5 +1,7 @@
+using Hope.Agent.AgentRuntime.Roles;
 using Hope.Agent.AgentRuntime.Subagents;
 using Hope.Agent.Application.Agents;
+using Hope.Agent.Application.Agents.Multi;
 using Hope.Agent.Application.Subagents;
 using Hope.Agent.Shared;
 using Microsoft.Extensions.Configuration;
@@ -17,6 +19,14 @@ public static class DependencyInjection
         services.AddScoped<Hope.Agent.AgentRuntime.Security.SandboxedToolExecutor>();
         services.AddScoped<IAgentRuntime, AgentOrchestrator>();
         services.AddSingleton<ISubagentPool, ParallelSubagentPool>();
+
+        // ── Clinical workflow agent roles ────────────────────────────────────
+        services.AddScoped<IAgentRole, SchedulingAgentRole>();
+        services.AddScoped<IAgentRole, MedicalSummaryAgentRole>();
+        services.AddScoped<IAgentRole, InsuranceVerificationAgentRole>();
+        services.AddScoped<IAgentRole, ReminderAgentRole>();
+        services.AddScoped<IAgentRole, AuditReportAgentRole>();
+
         return services;
     }
 }

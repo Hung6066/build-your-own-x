@@ -1,0 +1,96 @@
+using Hope.Agent.Application.Tools;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace Hope.Agent.Tools.Modules;
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Mỗi class dưới đây là một "module tool" cho một workflow cụ thể.
+// Quy tắc:
+//   - WorkflowName phải khớp với WorkflowName trong MultiAgent/Modules/WorkflowModules.cs
+//   - Chỉ đăng ký IAgentTool ở đây; IAgentRole đăng ký ở phía MultiAgent
+//   - Để thêm workflow mới: tạo thêm một class sealed mới bên dưới, không cần chỉnh DI
+// ────────────────────────────────────────────────────────────────────────────────
+
+/// <summary>Tool dùng chung, không gắn với một workflow cụ thể.</summary>
+internal sealed class CoreToolModule : IWorkflowModule
+{
+    public string WorkflowName => "core";
+
+    public void RegisterServices(IServiceCollection services)
+    {
+        services.AddScoped<IAgentTool, PatientLookupTool>();
+        services.AddScoped<IAgentTool, AppointmentScheduleTool>();
+        services.AddScoped<IAgentTool, InsuranceVerifyTool>();
+        services.AddScoped<IAgentTool, ClinicalGuidelineSearchTool>();
+    }
+}
+
+/// <summary>
+/// Tool phục vụ <c>AppointmentSchedulingWorkflow</c>.
+/// Các bước: map_specialty → get_doctor_slots → commit_booking.
+/// Role tương ứng: SpecialtyRoutingAgent, HisSlotsAgent, HisBookingAgent.
+/// </summary>
+internal sealed class AppointmentSchedulingToolModule : IWorkflowModule
+{
+    public string WorkflowName => "appointment-scheduling";
+
+    public void RegisterServices(IServiceCollection services)
+    {
+        services.AddScoped<IAgentTool, MapSpecialtyTool>();
+        services.AddScoped<IAgentTool, GetDoctorSlotsTool>();
+        services.AddScoped<IAgentTool, CommitBookingTool>();
+    }
+}
+
+/// <summary>
+/// Tool phục vụ <c>MedicationReminderWorkflow</c>.
+/// Bước: get_medication_schedule (đọc lịch trình hiện tại khi khởi tạo nhắc nhở).
+/// Role tương ứng: MedicationLookupAgent.
+/// </summary>
+internal sealed class MedicationReminderToolModule : IWorkflowModule
+{
+    public string WorkflowName => "medication-reminder";
+
+    public void RegisterServices(IServiceCollection services)
+    {
+        services.AddScoped<IAgentTool, GetMedicationScheduleTool>();
+    }
+}
+
+/// <summary>
+/// Tool phục vụ <c>AuditReportWorkflow</c>.
+/// Các bước: collect_audit_logs → detect_audit_anomalies → export_audit_report.
+/// Role tương ứng: AuditExecutionAgent (xử lý cả 4 intent trong một role).
+/// </summary>
+internal sealed class AuditReportToolModule : IWorkflowModule
+{
+    public string WorkflowName => "audit-report";
+
+    public void RegisterServices(IServiceCollection services)
+    {
+        services.AddScoped<IAgentTool, CollectAuditLogsTool>();
+        services.AddScoped<IAgentTool, DetectAuditAnomaliesTool>();
+        services.AddScoped<IAgentTool, ExportAuditReportTool>();
+    }
+}
+
+/// <summary>
+/// Optimization tools — không gắn với một workflow đơn lẻ,
+/// nhưng có thể được dùng bởi bất kỳ workflow nào cần tối ưu hóa.
+///
+/// Algorithms:
+///   - OptimizeBatchAppointmentsTool : Min-Cost Max-Flow (slot allocation)
+///   - RankTriagePatientsTool         : Weighted multi-criteria EDF scoring
+///   - ThrottleNotificationsTool      : Token-bucket rate limiting
+/// </summary>
+internal sealed class OptimizationToolModule : IWorkflowModule
+{
+    public string WorkflowName => "optimization";
+
+    public void RegisterServices(IServiceCollection services)
+    {
+        services.AddScoped<IAgentTool, OptimizeBatchAppointmentsTool>();
+        services.AddScoped<IAgentTool, RankTriagePatientsTool>();
+        services.AddScoped<IAgentTool, ThrottleNotificationsTool>();
+    }
+}

@@ -1,4 +1,5 @@
 using Hope.Agent.Application.LLM;
+using Hope.Agent.Application.Security;
 using Hope.Agent.Application.Tools;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -15,6 +16,7 @@ namespace Hope.Agent.Tools.Mcp;
 internal sealed class McpToolDiscoveryService(
     IToolRegistry registry,
     IOptions<McpOptions> opts,
+    ISsrfGuard ssrfGuard,
     ILogger<McpToolDiscoveryService> log) : BackgroundService
 {
     private readonly List<McpClient> _clients = [];
@@ -32,7 +34,7 @@ internal sealed class McpToolDiscoveryService(
         {
             try
             {
-                var client = await ConnectAsync(server, stoppingToken);
+                var client = await ConnectAsync(server, ssrfGuard, stoppingToken);
                 _clients.Add(client);
 
                 var tools = await client.ListToolsAsync(cancellationToken: stoppingToken);
@@ -62,7 +64,7 @@ internal sealed class McpToolDiscoveryService(
         }
     }
 
-    private static async Task<McpClient> ConnectAsync(McpServerEntry server, CancellationToken ct)
+    private static async Task<McpClient> ConnectAsync(McpServerEntry server, ISsrfGuard ssrfGuard, CancellationToken ct)
     {
         if (server.Transport.Equals("stdio", StringComparison.OrdinalIgnoreCase))
         {
@@ -76,10 +78,18 @@ internal sealed class McpToolDiscoveryService(
         }
 
         // HTTP / SSE (default)
+        var rawEndpoint = server.Endpoint ?? throw new InvalidOperationException(
+            $"MCP server '{server.Name}': Endpoint is required for HTTP transport.");
+
+        // ── NemoClaw SSRF guard: validate MCP endpoint before connecting ──
+        var ssrf = ssrfGuard.Validate(rawEndpoint);
+        if (!ssrf.Safe)
+            throw new InvalidOperationException(
+                $"MCP server '{server.Name}': endpoint blocked by SSRF guard — {ssrf.BlockReason}");
+
         var httpTransport = new HttpClientTransport(new HttpClientTransportOptions
         {
-            Endpoint = new Uri(server.Endpoint ?? throw new InvalidOperationException(
-                $"MCP server '{server.Name}': Endpoint is required for HTTP transport.")),
+            Endpoint = new Uri(rawEndpoint),
         });
         return await McpClient.CreateAsync(httpTransport, cancellationToken: ct);
     }

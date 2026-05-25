@@ -21,10 +21,11 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddAgentTools(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddScoped<IAgentTool, PatientLookupTool>();
-        services.AddScoped<IAgentTool, AppointmentScheduleTool>();
-        services.AddScoped<IAgentTool, InsuranceVerifyTool>();
-        services.AddScoped<IAgentTool, ClinicalGuidelineSearchTool>();
+        // Auto-discover toàn bộ IWorkflowModule trong assembly này và gọi RegisterServices.
+        // Để thêm workflow mới: tạo class : IWorkflowModule trong Modules/WorkflowModules.cs,
+        // không cần chỉnh sửa file này.
+        ApplyWorkflowModules(services);
+
         services.AddSingleton<IToolRegistry, ToolRegistry>();
 
         // MCP client: kết nối tới các MCP server bên ngoài
@@ -32,5 +33,20 @@ public static class DependencyInjection
         services.AddHostedService<McpToolDiscoveryService>();
 
         return services;
+    }
+
+    /// <summary>
+    /// Tìm toàn bộ <see cref="IWorkflowModule"/> trong assembly hiện tại,
+    /// khởi tạo và gọi <c>RegisterServices</c> cho từng module.
+    /// </summary>
+    private static void ApplyWorkflowModules(IServiceCollection services)
+    {
+        var moduleType = typeof(IWorkflowModule);
+        foreach (var type in typeof(DependencyInjection).Assembly.GetTypes()
+            .Where(t => moduleType.IsAssignableFrom(t) && !t.IsAbstract && !t.IsInterface))
+        {
+            var module = (IWorkflowModule)Activator.CreateInstance(type)!;
+            module.RegisterServices(services);
+        }
     }
 }

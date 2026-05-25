@@ -6,7 +6,8 @@ public sealed record AgentRequest(
     string Message,
     string? AgentProfile = null,
     string? CorrelationId = null,
-    bool Stream = false);
+    bool Stream = false,
+    IReadOnlyList<string>? Roles = null);
 
 public sealed record AgentResponse(
     Guid ConversationId,

@@ -1,9 +1,9 @@
 # Hope.Agent — Developer Guide
 
-> **Phiên bản tài liệu:** Phase 8 · .NET 9 · Clean Architecture · Build: ✅ 13/13 projects, 0 errors
+> **Phiên bản tài liệu:** Phase 16 · .NET 9 · Clean Architecture · Build: ✅ 13/13 projects, 0 errors · 0 warnings
 
 Tài liệu này mô tả toàn bộ kiến trúc, luồng xử lý và các quyết định thiết kế của **Hope.Agent**
-qua 7 phase phát triển liên tiếp. Mỗi phase được giải thích kèm **lưu đồ Mermaid**, danh sách
+qua 16 phase phát triển liên tiếp. Mỗi phase được giải thích kèm **lưu đồ Mermaid**, danh sách
 file liên quan và bảng cơ sở dữ liệu.
 
 ---
@@ -32,6 +32,9 @@ file liên quan và bảng cơ sở dữ liệu.
 20. [Phase 11 — Advanced Learning & UX](#20-phase-11--advanced-learning--ux-user-model--insights--slash--compression)
 21. [Phase 12 — Subagents · Voice · Trajectory Export](#21-phase-12--parallel-subagents--voice--trajectory-export)
 22. [Phase 13 — Operational Maturity](#22-phase-13--operational-maturity-kanban--clinical-context--migration--doctor-cli)
+23. [Phase 14 — Google I/O 2026 Capabilities](#23-phase-14--google-io-2026-capabilities-elo-tournament--mcp-atlas--deep-research)
+24. [Phase 15 — Enterprise Security Hardening](#24-phase-15--enterprise-security-hardening-owasp-llm-top-10)
+25. [Phase 16 — NemoClaw Security Rails](#25-phase-16--nemoclaw-security-rails-ssrf--retrieval-rail--execution-rail)
 
 ---
 
@@ -2742,20 +2745,342 @@ Chỉ Kanban tạo bảng mới — clinical context dùng file system, migratio
 
 ### Tóm tắt feature flags Phase 9–13
 
-| Section | Flag                             | Default | Mô tả ngắn                    |
-| ------- | -------------------------------- | ------- | ----------------------------- |
-| 19      | `Channels:Zalo:Enabled`          | `false` | Zalo OA webhook               |
-| 19      | `Channels:Slack:Enabled`         | `false` | Slack Events API              |
-| 19      | `Channels:Email:Enabled`         | `false` | SMTP send                     |
-| 20      | `UserModel:Enabled`              | `false` | Trait extraction              |
-| 20      | `SessionInsights:Enabled`        | `false` | Weekly LLM summary            |
-| 20      | `ConversationCompressor:Enabled` | `false` | Auto-compress > 40 turns      |
-| 20      | `SkillSelfImprovement:Enabled`   | `false` | Auto-revise low-reward skills |
-| 21      | `Subagents:Enabled`              | `false` | Parallel fan-out              |
-| 21      | `Speech:Enabled`                 | `false` | STT + TTS                     |
-| 21      | `TrajectoryExport:Enabled`       | `false` | SFT dataset export            |
-| 22      | `Kanban:Enabled`                 | `false` | Kanban task store             |
-| 22      | `ClinicalContext:Enabled`        | `false` | Per-khoa context files        |
-| 22      | `Migration:Enabled`              | `false` | External chatbot importer     |
+| Section | Flag                                 | Default | Mô tả ngắn                                                 |
+| ------- | ------------------------------------ | ------- | ---------------------------------------------------------- |
+| 19      | `Channels:Zalo:Enabled`              | `false` | Zalo OA webhook                                            |
+| 19      | `Channels:Slack:Enabled`             | `false` | Slack Events API                                           |
+| 19      | `Channels:Email:Enabled`             | `false` | SMTP send                                                  |
+| 20      | `UserModel:Enabled`                  | `false` | Trait extraction                                           |
+| 20      | `SessionInsights:Enabled`            | `false` | Weekly LLM summary                                         |
+| 20      | `ConversationCompressor:Enabled`     | `false` | Auto-compress > 40 turns                                   |
+| 20      | `SkillSelfImprovement:Enabled`       | `false` | Auto-revise low-reward skills                              |
+| 21      | `Subagents:Enabled`                  | `false` | Parallel fan-out                                           |
+| 21      | `Speech:Enabled`                     | `false` | STT + TTS                                                  |
+| 21      | `TrajectoryExport:Enabled`           | `false` | SFT dataset export                                         |
+| 22      | `Kanban:Enabled`                     | `false` | Kanban task store                                          |
+| 22      | `ClinicalContext:Enabled`            | `false` | Per-khoa context files                                     |
+| 22      | `Migration:Enabled`                  | `false` | External chatbot importer                                  |
+| 23      | `AgentRuntime:EnableAdaptiveRouting` | `true`  | Elo-ranked adaptive router                                 |
+| 23      | `Research:Mode`                      | `Fast`  | DeepResearch: Fast / Max                                   |
+| 24–25   | _(always on — security defaults)_    | —       | OutputShield · RBAC · SSRF · RetrievalRail · ExecutionRail |
 
 Tất cả tính năng Phase 9–13 mặc định **OFF**. Bật từng cái khi có nhu cầu vận hành thực tế và đã chuẩn bị credential / dataset tương ứng.
+Phase 14–16 là các tính năng **bật mặc định**: security rails luôn active, Deep Research có thể gọi qua API ngay khi cấu hình `GeminiOptions`.
+
+---
+
+## 23. Phase 14 — Google I/O 2026 Capabilities (Elo Tournament · MCP Atlas · Deep Research)
+
+Phase 14 bổ sung ba tính năng lấy cảm hứng từ Google I/O 2026: hệ thống **Elo ranking** cho eval runs, endpoint **MCP Atlas tool schema**, và **Deep Research agent** theo mô hình Gemini Deep Research Max.
+
+### 23.1 Elo Tournament — tự động ranking EvalRun
+
+Mỗi `EvalRun` có thêm cột `EloRating` (mặc định 1000.0, K=32). Sau mỗi lần chạy eval hàng ngày, `EvaluationHarnessHostedService` tự động gọi `RunEloTournamentAsync` để so sánh 2 run gần nhất.
+
+**Thuật toán:**
+
+1. Parse `ReportJson` của 2 run → lấy điểm per-case
+2. Mỗi cặp case → xác định win/loss/draw (margin ≤ 0.05 = draw)
+3. Áp công thức Elo: `E = 1 / (1 + 10^((Rb - Ra) / 400))`, `Ra += K × (S - E)`
+4. Persist cả hai `EloRating` vào DB
+
+```mermaid
+sequenceDiagram
+    participant HS as EvaluationHarnessHostedService
+    participant EH as EvaluationHarness
+    participant DB as AgentDbContext
+
+    HS->>EH: RunDailyEvalAsync()
+    EH->>DB: SaveEvalRun(runA)
+    HS->>EH: RunEloTournamentAsync("default")
+    EH->>DB: GetLastTwoRuns(suite)
+    DB-->>EH: runA, runB
+    EH->>EH: ParseReportItems(runA) + ParseReportItems(runB)
+    EH->>EH: count wins/losses/draws → apply K=32 Elo
+    EH->>DB: runA.EloRating = X, runB.EloRating = Y
+    EH-->>HS: EloTournamentResult(WinnerId, WinnerEloAfter, ...)
+```
+
+**Endpoints:**
+
+| Method | Path                                                  | Mô tả                        |
+| ------ | ----------------------------------------------------- | ---------------------------- |
+| `POST` | `/v1/learning/eval/tournament?suite=default`          | Chạy Elo tournament thủ công |
+| `GET`  | `/v1/learning/eval/leaderboard?suite=default&take=20` | Xem bảng xếp hạng Elo        |
+
+**Files liên quan:**
+
+| File                                                                       | Vai trò                                                               |
+| -------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `src/Hope.Agent.Domain/Learning/LearningEntities.cs`                       | `EvalRun.EloRating` property                                          |
+| `src/Hope.Agent.Application/Learning/ILearningAbstractions.cs`             | `RunEloTournamentAsync`, `GetLeaderboardAsync`, `EloTournamentResult` |
+| `src/Hope.Agent.Infrastructure/Learning/EvaluationHarness.cs`              | Elo logic + `ParseReportItems`                                        |
+| `src/Hope.Agent.Infrastructure/Learning/EvaluationHarnessHostedService.cs` | Auto-trigger sau daily eval                                           |
+| `src/Hope.Agent.Api/Endpoints/LearningEndpoints.cs`                        | Tournament + leaderboard REST                                         |
+
+---
+
+### 23.2 MCP Atlas Tool Schema — chuẩn hóa tool discovery
+
+NemoClaw / MCP Atlas định nghĩa format JSON chuẩn để client khám phá tools của agent. Hope.Agent expose toàn bộ `IToolRegistry` theo format này.
+
+```
+GET /v1/tools
+→ { "tools": [ { "type": "function", "function": { "name": "...", "description": "...", "parameters": {...} } } ] }
+
+GET /v1/tools/{name}
+→ { "type": "function", "function": { ... } }
+```
+
+Endpoint không yêu cầu auth (tool schema là metadata cấu trúc, không nhạy cảm). Dùng để tích hợp với MCP Atlas benchmark hoặc bất kỳ orchestrator nào cần khám phá tool tự động.
+
+**Files liên quan:**
+
+| File                                             | Vai trò                                 |
+| ------------------------------------------------ | --------------------------------------- |
+| `src/Hope.Agent.Api/Endpoints/ToolsEndpoints.cs` | `GET /v1/tools`, `GET /v1/tools/{name}` |
+
+---
+
+### 23.3 Deep Research Agent — Gemini grounded research
+
+Inspired by Gemini Deep Research Max — agent thực hiện nghiên cứu đa nguồn có grounding qua Google Search, trả về báo cáo có citation.
+
+**Hai mode:**
+
+| Mode   | Mô tả                                                      | Số bước |
+| ------ | ---------------------------------------------------------- | ------- |
+| `Fast` | 1 call Gemini với `google_search` tool grounding           | 1       |
+| `Max`  | 3-phase: plan sub-questions → search từng câu → synthesize | 3N+1    |
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as POST /v1/research
+    participant DR as GeminiDeepResearchAgent
+    participant G as Gemini API
+
+    C->>API: { query, mode: "Max", maxSources: 20 }
+    API->>DR: ResearchAsync(request)
+    DR->>G: planPrompt → sub-questions JSON
+    G-->>DR: ["q1", "q2", ..., "qN"]
+    loop Per sub-question
+        DR->>G: searchPrompt(qi) + google_search grounding
+        G-->>DR: partial findings + citations
+    end
+    DR->>G: synthesizePrompt(allFindings)
+    G-->>DR: ResearchReport(title, summary, fullContent, citations)
+    DR-->>API: ResearchReport
+    API-->>C: 200 ResearchReport
+```
+
+**Cấu hình:**
+
+```json
+"Gemini": {
+  "DeepResearchModel": "gemini-2.5-flash"
+}
+```
+
+**Files liên quan:**
+
+| File                                                            | Vai trò                                                  |
+| --------------------------------------------------------------- | -------------------------------------------------------- |
+| `src/Hope.Agent.Application/Research/IDeepResearchAgent.cs`     | Interface + `ResearchRequest` / `ResearchReport` records |
+| `src/Hope.Agent.LLMGateway/Research/GeminiDeepResearchAgent.cs` | Fast + Max mode, `$$"""` raw string cho planPrompt       |
+| `src/Hope.Agent.Api/Endpoints/ResearchEndpoints.cs`             | `POST /v1/research` (auth required)                      |
+| `src/Hope.Agent.LLMGateway/LLMOptions.cs`                       | `GeminiOptions.DeepResearchModel`                        |
+
+---
+
+## 24. Phase 15 — Enterprise Security Hardening (OWASP LLM Top 10)
+
+Phase 15 đóng 3 lỗ hổng từ **OWASP LLM Top 10 2025** chưa được address ở các phase trước.
+
+```mermaid
+flowchart LR
+    ARGS["argumentsJson"] -->|LLM07| SANDBOX["SandboxedToolExecutor\nJSON object validation"]
+    SANDBOX -->|invoke| TOOL["IAgentTool.InvokeAsync"]
+    TOOL -->|output| LLM["LLM context"]
+    LLM -->|finalContent| OS["RegexOutputShield\nLLM06"]
+    OS -->|SafeContent| CLIENT["Client"]
+
+    JWT["JWT roles"] -->|LLM08| RBAC["ConfigurableToolAccessPolicy\nTool RBAC"]
+    RBAC -->|allowed| SANDBOX
+    RBAC -->|denied| DENY["tool_access_denied"]
+```
+
+### 24.1 LLM07 — Insecure Plugin Design: JSON arg validation
+
+Trước Phase 15, `SandboxedToolExecutor` chỉ enforce timeout. Một tool call với `argumentsJson = "DROP TABLE patients"` có thể crash tool implementation hoặc exploit deserialization.
+
+**Fix:** Trước khi invoke tool, validate:
+
+1. Normalize empty/whitespace args → `{}`
+2. Parse JSON — nếu `JsonException` → `ArgumentException` (rejected)
+3. Kiểm tra `RootElement.ValueKind == Object` — array/string/number → `ArgumentException`
+
+Metric: `hope_tool_errors_total{reason="malformed_json_args"}` và `{reason="invalid_arg_type"}`
+
+### 24.2 LLM06 — Sensitive Information Disclosure: Output Credential Shield
+
+`IOutputShield` / `RegexOutputShield` scan output của LLM (sau reflection) trước khi trả về client. Phát hiện:
+
+| Pattern               | Ví dụ                             |
+| --------------------- | --------------------------------- |
+| PEM private key       | `-----BEGIN RSA PRIVATE KEY-----` |
+| Bearer token          | `Authorization: Bearer eyJ...`    |
+| OpenAI API key        | `sk-...` (51 chars)               |
+| Anthropic key         | `sk-ant-...`                      |
+| GitHub token          | `ghp_`, `gho_`, `github_pat_`     |
+| DB password trong URI | `postgresql://user:pass@host`     |
+
+Khi phát hiện: redact → dùng `SafeContent`, log warning, tăng `PromptShieldBlocks{reason="output:..."}`. **Không throw** — luôn trả response an toàn.
+
+**Files liên quan:**
+
+| File                                                          | Vai trò                                                 |
+| ------------------------------------------------------------- | ------------------------------------------------------- |
+| `src/Hope.Agent.Application/Security/IOutputShield.cs`        | Interface + `OutputShieldResult` record                 |
+| `src/Hope.Agent.Infrastructure/Security/RegexOutputShield.cs` | Compiled regex patterns, redaction                      |
+| `src/Hope.Agent.AgentRuntime/AgentOrchestrator.cs`            | Gọi `outputShield.Inspect(finalContent)` sau reflection |
+
+### 24.3 LLM08 — Excessive Agency: Tool RBAC
+
+Trước Phase 15, mọi user có thể gọi mọi tool nếu prompt phù hợp. `ConfigurableToolAccessPolicy` áp RBAC per-tool dựa trên JWT roles.
+
+**Config:**
+
+```json
+"ToolApproval": {
+  "ToolRoleAccess": {
+    "admin_reset_patient": ["physician", "admin"],
+    "export_trajectory":   ["admin"]
+  }
+}
+```
+
+- Key không có trong dict → tool mở cho mọi role (backward-compatible)
+- Array rỗng `[]` → cũng mở
+- Populated array → user phải có ít nhất 1 role khớp
+
+Kiểm tra chạy **trước** `IToolApprovalPolicy` trong `ExecuteToolAsync`. Deny → log + `ToolApprovalsDenied{reason="rbac"}`.
+
+**JWT role extraction** (`AgentEndpoints.ResolveRoles`):
+
+- Claims: `ClaimTypes.Role`, `"role"`, `"roles"` (mảng JSON)
+- Pass qua `AgentRequest.Roles` → `ToolInvocationContext.Roles`
+
+**Files liên quan:**
+
+| File                                                                     | Vai trò                         |
+| ------------------------------------------------------------------------ | ------------------------------- |
+| `src/Hope.Agent.Application/Security/IToolAccessPolicy.cs`               | Interface                       |
+| `src/Hope.Agent.Application/Security/ToolApprovalOptions.cs`             | `ToolRoleAccess` dictionary     |
+| `src/Hope.Agent.Infrastructure/Security/ConfigurableToolAccessPolicy.cs` | Lookup + match logic            |
+| `src/Hope.Agent.AgentRuntime/AgentOrchestrator.cs`                       | RBAC check trước approval gate  |
+| `src/Hope.Agent.Api/Endpoints/AgentEndpoints.cs`                         | `ResolveRoles(ClaimsPrincipal)` |
+
+---
+
+## 25. Phase 16 — NemoClaw Security Rails (SSRF · Retrieval Rail · Execution Rail)
+
+Phase 16 được lấy cảm hứng từ **NVIDIA NemoClaw** (alpha, March 2026) — reference stack cho OpenClaw agents với sandbox Landlock+seccomp+netns và **NeMo Guardrails** (5 loại rail: Input/Dialog/Retrieval/Execution/Output).
+
+Ba khái niệm được port sang .NET:
+
+```mermaid
+flowchart TD
+    MCP_CFG["McpServerEntry\n(HTTP endpoint)"] -->|1. Validate URL| SSRF["HeuristicSsrfGuard\nISsrfGuard"]
+    SSRF -->|blocked| FAIL["InvalidOperationException"]
+    SSRF -->|safe| CONNECT["McpClient.CreateAsync"]
+
+    VECS["Qdrant vector search"] -->|2. MemorySearchHit[]| RAIL["PromptShieldRetrievalRail\nIRetrievalRail"]
+    RAIL -->|poisoned chunks dropped| BUILD["BuildMessages"]
+    RAIL -->|safe hits| BUILD
+
+    TOOL_OUT["tool.InvokeAsync → output"] -->|3. Screen output| EXEC_RAIL["IPromptShield\n(via SandboxedToolExecutor)"]
+    EXEC_RAIL -->|injection found| SANITIZE["SanitizedInput + log + metric"]
+    EXEC_RAIL -->|clean| LLM_CTX["LLM context"]
+    SANITIZE --> LLM_CTX
+```
+
+### 25.1 SSRF Guard — NemoClaw `blueprint/ssrf.ts`
+
+NemoClaw validate IP + DNS trước khi kết nối bất kỳ endpoint nào từ sandbox. Hope.Agent áp tương tự cho MCP HTTP server connections.
+
+**Blocked:**
+
+- Scheme khác http/https
+- Loopback: `localhost`, `127.0.0.1`, `::1`
+- RFC 1918 private: `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+- Link-local / APIPA: `169.254.0.0/16`
+- Cloud metadata: `169.254.169.254` (AWS/Azure IMDS), `metadata.google.internal` (GCP), `169.254.170.2` (ECS)
+
+Dùng `IPAddress.TryParse` để detect literal IP URLs. Hostname-level check cho well-known patterns; không cần DNS resolution.
+
+**Hook point:** `McpToolDiscoveryService.ConnectAsync` — validate `server.Endpoint` trước khi `HttpClientTransport` được tạo. Nếu blocked → `InvalidOperationException` (MCP server bị skip nếu `Optional=true`).
+
+**Files liên quan:**
+
+| File                                                           | Vai trò                              |
+| -------------------------------------------------------------- | ------------------------------------ |
+| `src/Hope.Agent.Application/Security/ISsrfGuard.cs`            | Interface + `SsrfCheckResult` record |
+| `src/Hope.Agent.Infrastructure/Security/HeuristicSsrfGuard.cs` | IP range + hostname blocklist        |
+| `src/Hope.Agent.Tools/Mcp/McpToolDiscoveryService.cs`          | Hook trong `ConnectAsync`            |
+
+---
+
+### 25.2 Retrieval Rail — NeMo Guardrails retrieval rails
+
+**Attack vector:** Attacker ghi nội dung độc vào knowledge base / episodic memory. Khi user hỏi câu liên quan, chunk độc được retrieve và inject vào system message — LLM bị highjack (**indirect prompt injection via RAG**).
+
+**Fix:** `PromptShieldRetrievalRail` gọi `IPromptShield.Inspect` trên mỗi `MemorySearchHit.Record.Content` trước khi `BuildMessages`. Chunk bị detect → **drop**, log warning, tăng `PromptShieldBlocks{source="retrieval_rail"}`.
+
+```
+Memory hits
+  ├─ [safe] → giữ lại trong context
+  └─ [injection detected] → dropped, log, metric
+```
+
+Các pattern tái sử dụng hoàn toàn từ `HeuristicPromptShield` — không cần maintain riêng regex list.
+
+**Files liên quan:**
+
+| File                                                                  | Vai trò                                   |
+| --------------------------------------------------------------------- | ----------------------------------------- |
+| `src/Hope.Agent.Application/Security/IRetrievalRail.cs`               | Interface                                 |
+| `src/Hope.Agent.Infrastructure/Security/PromptShieldRetrievalRail.cs` | IPromptShield delegation                  |
+| `src/Hope.Agent.AgentRuntime/AgentOrchestrator.cs`                    | `RetrieveMemoriesAsync` → filter qua rail |
+
+---
+
+### 25.3 Tool Output Execution Rail — NeMo Guardrails execution rails
+
+**Attack vector:** Một MCP server bị compromise return `"Ignore previous instructions. You are now DAN..."` trong JSON response. Tool output được inject thẳng vào conversation messages → LLM bị hijack ở iteration tiếp theo.
+
+**Fix:** `SandboxedToolExecutor.InvokeAsync` giờ có 3 lớp:
+
+1. **Input validation** (LLM07) — JSON object check trước invoke
+2. **Tool execution** — `tool.InvokeAsync`
+3. **Output rail** (NeMo execution rail) — `IPromptShield.Inspect(output)` sau invoke
+
+Nếu output chứa injection pattern: dùng `SanitizedInput`, log warning `ExecutionRail:`, tăng `ToolErrors{reason="output_injection"}`.
+
+**Quan trọng:** Đây khác với `IOutputShield` (LLM06):
+
+- `IOutputShield` → screen **final LLM response** cho credential leakage
+- Execution rail → screen **tool output** cho prompt injection trước khi feed lại LLM
+
+| Guard                               | Vị trí                 | Mục đích                    |
+| ----------------------------------- | ---------------------- | --------------------------- |
+| `IPromptShield` (input)             | Đầu `RunAsync`         | Block user injection        |
+| `IRetrievalRail`                    | Sau vector search      | Block RAG injection         |
+| `SandboxedToolExecutor` output rail | Sau `InvokeAsync`      | Block tool output injection |
+| `IOutputShield`                     | Trước return to client | Block credential leakage    |
+
+**Files liên quan:**
+
+| File                                                            | Vai trò                                              |
+| --------------------------------------------------------------- | ---------------------------------------------------- |
+| `src/Hope.Agent.AgentRuntime/Security/SandboxedToolExecutor.cs` | Inject `IPromptShield outputRail`, screen sau invoke |

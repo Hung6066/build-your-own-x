@@ -30,4 +30,21 @@ public sealed class ToolApprovalOptions
     /// Per-tool impact mapping. Keys are tool names (case-insensitive).
     /// </summary>
     public Dictionary<string, ToolImpactLevel> Tools { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Per-tool role allowlists (RBAC).  Keys are tool names (case-insensitive),
+    /// values are the roles that may invoke the tool.  An empty array means any
+    /// authenticated user may invoke it.  If a tool has no entry, access is open.
+    /// <example>
+    /// <code>
+    /// "ToolApproval": {
+    ///   "ToolRoleAccess": {
+    ///     "admin_reset_patient": ["physician", "admin"],
+    ///     "export_all_records":   ["admin"]
+    ///   }
+    /// }
+    /// </code>
+    /// </example>
+    /// </summary>
+    public Dictionary<string, string[]> ToolRoleAccess { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }

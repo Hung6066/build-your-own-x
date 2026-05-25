@@ -75,6 +75,76 @@ public static class WorkflowEndpoints
             return Results.NoContent();
         });
 
+        // ── Appointment Scheduling ────────────────────────────────────────────
+        grp.MapPost("/scheduling", async (
+            [FromBody] StartSchedulingRequest req,
+            [FromServices] IWorkflowDispatcher dispatcher,
+            ClaimsPrincipal user,
+            CancellationToken ct) =>
+        {
+            var userId = ResolveUserId(user);
+            var input = new AppointmentSchedulingInput(
+                PatientId: req.PatientId,
+                UserId: userId,
+                ChiefComplaint: req.ChiefComplaint,
+                Urgency: req.Urgency,
+                PreferredDoctorId: req.PreferredDoctorId,
+                PreferredTime: req.PreferredTime,
+                InsuranceCardNumber: req.InsuranceCardNumber);
+            var res = await dispatcher.StartAppointmentSchedulingAsync(input, req.WorkflowId, ct);
+            return Results.Accepted($"/v1/workflows/{res.WorkflowId}", res);
+        });
+
+        // ── Medication Reminder ───────────────────────────────────────────────
+        grp.MapPost("/reminders", async (
+            [FromBody] StartReminderRequest req,
+            [FromServices] IWorkflowDispatcher dispatcher,
+            ClaimsPrincipal user,
+            CancellationToken ct) =>
+        {
+            var userId = ResolveUserId(user);
+            var input = new MedicationReminderInput(
+                PatientId: req.PatientId,
+                UserId: userId,
+                MedicationName: req.MedicationName,
+                Dosage: req.Dosage,
+                Frequency: req.Frequency,
+                StartAt: req.StartAt ?? DateTimeOffset.UtcNow.AddHours(1),
+                DurationDays: req.DurationDays,
+                PreferredChannel: req.PreferredChannel,
+                AdherenceRiskScore: req.AdherenceRiskScore);
+            var res = await dispatcher.StartMedicationReminderAsync(input, req.WorkflowId, ct);
+            return Results.Accepted($"/v1/workflows/{res.WorkflowId}", res);
+        });
+
+        grp.MapPost("/reminders/{workflowId}/confirm", async (
+            string workflowId,
+            [FromBody] ReminderConfirmRequest req,
+            [FromServices] IWorkflowDispatcher dispatcher,
+            CancellationToken ct) =>
+        {
+            var confirmation = new ReminderConfirmation(workflowId, req.Confirmed, req.Note);
+            await dispatcher.SignalReminderConfirmationAsync(workflowId, confirmation, ct);
+            return Results.NoContent();
+        });
+
+        // ── Audit Report ──────────────────────────────────────────────────────
+        grp.MapPost("/audit", async (
+            [FromBody] StartAuditRequest req,
+            [FromServices] IWorkflowDispatcher dispatcher,
+            ClaimsPrincipal user,
+            CancellationToken ct) =>
+        {
+            var input = new AuditReportInput(
+                RequestedBy: ResolveUserId(user),
+                ReportType: req.ReportType,
+                PeriodStart: req.PeriodStart,
+                PeriodEnd: req.PeriodEnd,
+                ExportFormat: req.ExportFormat);
+            var res = await dispatcher.StartAuditReportAsync(input, req.WorkflowId, ct);
+            return Results.Accepted($"/v1/workflows/{res.WorkflowId}", res);
+        });
+
         return app;
     }
 
@@ -102,3 +172,32 @@ public sealed record StartTriageRequest(
 public sealed record SignalRequest(string Step, bool Approved, string? Reason);
 
 public sealed record CancelRequest(string Reason);
+
+public sealed record StartSchedulingRequest(
+    Guid PatientId,
+    string ChiefComplaint,
+    string Urgency = "normal",
+    string? PreferredDoctorId = null,
+    string? PreferredTime = null,
+    string? InsuranceCardNumber = null,
+    string? WorkflowId = null);
+
+public sealed record StartReminderRequest(
+    Guid PatientId,
+    string MedicationName,
+    string Dosage,
+    string Frequency,
+    int DurationDays,
+    DateTimeOffset? StartAt = null,
+    string PreferredChannel = "zalo",
+    int AdherenceRiskScore = 30,
+    string? WorkflowId = null);
+
+public sealed record ReminderConfirmRequest(bool Confirmed, string? Note = null);
+
+public sealed record StartAuditRequest(
+    string ReportType,
+    DateTimeOffset PeriodStart,
+    DateTimeOffset PeriodEnd,
+    string ExportFormat = "json",
+    string? WorkflowId = null);

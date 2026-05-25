@@ -36,6 +36,42 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
         return new WorkflowStartResult(handle.Id, handle.ResultRunId ?? string.Empty, DateTimeOffset.UtcNow);
     }
 
+    public async Task<WorkflowStartResult> StartAppointmentSchedulingAsync(AppointmentSchedulingInput input, string? workflowId = null, CancellationToken ct = default)
+    {
+        var id = workflowId ?? $"scheduling-{input.PatientId:N}-{Guid.CreateVersion7():N}";
+        var handle = await client.StartWorkflowAsync(
+            (AppointmentSchedulingWorkflow wf) => wf.RunAsync(input),
+            new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
+        HopeMeters.WorkflowsStarted.Add(1, new KeyValuePair<string, object?>("workflow", "appointment_scheduling"));
+        return new WorkflowStartResult(handle.Id, handle.ResultRunId ?? string.Empty, DateTimeOffset.UtcNow);
+    }
+
+    public async Task<WorkflowStartResult> StartMedicationReminderAsync(MedicationReminderInput input, string? workflowId = null, CancellationToken ct = default)
+    {
+        var id = workflowId ?? $"reminder-{input.PatientId:N}-{Guid.CreateVersion7():N}";
+        var handle = await client.StartWorkflowAsync(
+            (MedicationReminderWorkflow wf) => wf.RunAsync(input),
+            new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
+        HopeMeters.WorkflowsStarted.Add(1, new KeyValuePair<string, object?>("workflow", "medication_reminder"));
+        return new WorkflowStartResult(handle.Id, handle.ResultRunId ?? string.Empty, DateTimeOffset.UtcNow);
+    }
+
+    public async Task SignalReminderConfirmationAsync(string workflowId, ReminderConfirmation confirmation, CancellationToken ct = default)
+    {
+        var handle = client.GetWorkflowHandle<MedicationReminderWorkflow>(workflowId);
+        await handle.SignalAsync(wf => wf.ConfirmDoseAsync(confirmation)).ConfigureAwait(false);
+    }
+
+    public async Task<WorkflowStartResult> StartAuditReportAsync(AuditReportInput input, string? workflowId = null, CancellationToken ct = default)
+    {
+        var id = workflowId ?? $"audit-{input.ReportType}-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.CreateVersion7():N}";
+        var handle = await client.StartWorkflowAsync(
+            (AuditReportWorkflow wf) => wf.RunAsync(input),
+            new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
+        HopeMeters.WorkflowsStarted.Add(1, new KeyValuePair<string, object?>("workflow", "audit_report"));
+        return new WorkflowStartResult(handle.Id, handle.ResultRunId ?? string.Empty, DateTimeOffset.UtcNow);
+    }
+
     public async Task SignalApprovalAsync(string workflowId, ApprovalDecision decision, CancellationToken ct = default)
     {
         // Route signal by step name; "discharge" → discharge approval, anything else → insurance override.
@@ -74,7 +110,31 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
             }
             catch
             {
-                // workflow type unknown — fall through with just lifecycle status
+                try
+                {
+                    var queryHandle = client.GetWorkflowHandle<AppointmentSchedulingWorkflow>(workflowId);
+                    result = await queryHandle.QueryAsync(wf => wf.GetStatus()).ConfigureAwait(false);
+                }
+                catch
+                {
+                    try
+                    {
+                        var queryHandle = client.GetWorkflowHandle<MedicationReminderWorkflow>(workflowId);
+                        result = await queryHandle.QueryAsync(wf => wf.GetStatus()).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        try
+                        {
+                            var queryHandle = client.GetWorkflowHandle<AuditReportWorkflow>(workflowId);
+                            result = await queryHandle.QueryAsync(wf => wf.GetStatus()).ConfigureAwait(false);
+                        }
+                        catch
+                        {
+                            // workflow type unknown — fall through with just lifecycle status
+                        }
+                    }
+                }
             }
         }
 

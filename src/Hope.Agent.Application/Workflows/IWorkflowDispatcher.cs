@@ -10,6 +10,14 @@ public interface IWorkflowDispatcher
 
     Task<WorkflowStartResult> StartEmergencyTriageAsync(EmergencyTriageInput input, string? workflowId = null, CancellationToken ct = default);
 
+    Task<WorkflowStartResult> StartAppointmentSchedulingAsync(AppointmentSchedulingInput input, string? workflowId = null, CancellationToken ct = default);
+
+    Task<WorkflowStartResult> StartMedicationReminderAsync(MedicationReminderInput input, string? workflowId = null, CancellationToken ct = default);
+
+    Task SignalReminderConfirmationAsync(string workflowId, ReminderConfirmation confirmation, CancellationToken ct = default);
+
+    Task<WorkflowStartResult> StartAuditReportAsync(AuditReportInput input, string? workflowId = null, CancellationToken ct = default);
+
     Task SignalApprovalAsync(string workflowId, ApprovalDecision decision, CancellationToken ct = default);
 
     Task<WorkflowStatus> GetStatusAsync(string workflowId, CancellationToken ct = default);
@@ -43,3 +51,54 @@ public sealed record EmergencyTriageInput(
     string? Location = null);
 
 public sealed record ApprovalDecision(string Step, bool Approved, string? Reason, Guid ApproverId);
+
+// ── Appointment Scheduling ──────────────────────────────────────────────────
+
+public sealed record AppointmentSchedulingInput(
+    Guid PatientId,
+    Guid UserId,
+    string ChiefComplaint,
+    string Urgency = "normal",
+    string? PreferredDoctorId = null,
+    string? PreferredTime = null,
+    string? InsuranceCardNumber = null);
+
+public sealed record AppointmentSchedulingResult(
+    string BookingId,
+    string DoctorName,
+    string Specialty,
+    DateTimeOffset AppointmentTime,
+    string InsuranceSummary,
+    IReadOnlyList<string> StepLog);
+
+// ── Medication Reminder ─────────────────────────────────────────────────────
+
+public sealed record MedicationReminderInput(
+    Guid PatientId,
+    Guid UserId,
+    string MedicationName,
+    string Dosage,
+    string Frequency,
+    DateTimeOffset StartAt,
+    int DurationDays,
+    string PreferredChannel = "zalo",
+    int AdherenceRiskScore = 30);
+
+public sealed record ReminderConfirmation(string WorkflowId, bool Confirmed, string? Note);
+
+// ── Audit Report ────────────────────────────────────────────────────────────
+
+public sealed record AuditReportInput(
+    Guid RequestedBy,
+    string ReportType,
+    DateTimeOffset PeriodStart,
+    DateTimeOffset PeriodEnd,
+    string ExportFormat = "json");
+
+public sealed record AuditReportResult(
+    string ReportId,
+    string ReportType,
+    string NarrativeSummary,
+    string ExportPath,
+    string IntegrityHash,
+    IReadOnlyList<string> StepLog);

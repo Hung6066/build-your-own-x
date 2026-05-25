@@ -51,6 +51,9 @@ internal sealed class AgentOrchestrator(
     IToolRegistry tools,
     IToolApprovalPolicy approvalPolicy,
     IToolApprovalGate approvalGate,
+    IToolAccessPolicy accessPolicy,
+    IOutputShield outputShield,
+    IRetrievalRail retrievalRail,
     Hope.Agent.AgentRuntime.Security.SandboxedToolExecutor sandbox,
     IConversationRepository convRepo,
     IMemoryStore memory,
@@ -236,6 +239,15 @@ internal sealed class AgentOrchestrator(
             PayloadJson = JsonSerializer.Serialize(new { tools = toolExecutions.Select(t => t.Tool), provider, model, promptTokens, completionTokens, redactedInput = phi.Redact(request.Message) }),
         }, ct);
 
+        // ── LLM06: screen output for accidental credential/secret leakage ─────
+        var shieldResult = outputShield.Inspect(finalContent);
+        if (shieldResult.HasLeak)
+        {
+            log.LogWarning("OutputShield redacted {Count} secret pattern(s) from agent response: {Types}",
+                shieldResult.Detections.Count, string.Join(", ", shieldResult.Detections));
+            finalContent = shieldResult.SafeContent;
+        }
+
         return new AgentResponse(conv.Id, finalContent, toolExecutions, promptTokens, completionTokens, provider, model, sw.Elapsed);
     }
 
@@ -276,7 +288,9 @@ internal sealed class AgentOrchestrator(
         {
             var embedder = router.SelectEmbedding();
             var embed = await embedder.EmbedAsync(new EmbeddingRequest([request.Message]), ct);
-            return await memory.SearchAsync(request.UserId, embed.Vectors[0], _opts.MemoryTopK, kind: null, ct);
+            var hits = await memory.SearchAsync(request.UserId, embed.Vectors[0], _opts.MemoryTopK, kind: null, ct);
+            // ── NeMo Guardrails retrieval rail: drop chunks containing injection patterns ──
+            return retrievalRail.Filter(hits);
         }
         catch (Exception ex)
         {
@@ -352,7 +366,20 @@ internal sealed class AgentOrchestrator(
         }
         try
         {
-            var ctx = new ToolInvocationContext(request.UserId, conv.Id, request.CorrelationId ?? conv.Id.ToString());
+            var ctx = new ToolInvocationContext(request.UserId, conv.Id, request.CorrelationId ?? conv.Id.ToString(), request.Roles);
+
+            // ── LLM08: RBAC — check role-based tool access before approval ───
+            if (!accessPolicy.IsAllowed(call.Name, request.Roles ?? []))
+            {
+                var deny = JsonSerializer.Serialize(new { error = "tool_access_denied", tool = call.Name, reason = "insufficient_role" });
+                conv.AddMessage(MessageRole.Tool, deny, clock.UtcNow, call.Name, call.Id);
+                log.LogWarning("Tool {Tool} denied for user {User}: insufficient role. Roles=[{Roles}]",
+                    call.Name, request.UserId, string.Join(",", request.Roles ?? []));
+                HopeMeters.ToolApprovalsDenied.Add(1,
+                    new KeyValuePair<string, object?>("tool", call.Name),
+                    new KeyValuePair<string, object?>("reason", "rbac"));
+                return (deny, new AgentToolExecution(call.Name, call.ArgumentsJson, deny, sw.Elapsed, false));
+            }
 
             var policy = approvalPolicy.Decide(call.Name, call.ArgumentsJson);
             if (policy.Kind == ApprovalDecisionKind.AutoDeny)

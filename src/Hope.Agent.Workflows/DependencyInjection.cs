@@ -25,7 +25,10 @@ public static class DependencyInjection
                 .AddHostedTemporalWorker(options.TaskQueue)
                 .AddScopedActivities<ClinicalActivities>()
                 .AddWorkflow<PatientAdmissionWorkflow>()
-                .AddWorkflow<EmergencyTriageWorkflow>();
+                .AddWorkflow<EmergencyTriageWorkflow>()
+                .AddWorkflow<AppointmentSchedulingWorkflow>()
+                .AddWorkflow<MedicationReminderWorkflow>()
+                .AddWorkflow<AuditReportWorkflow>();
         }
 
         return services;
