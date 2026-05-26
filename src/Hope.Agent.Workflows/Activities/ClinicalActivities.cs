@@ -1,3 +1,4 @@
+using Hope.Agent.Application.Agents;
 using Hope.Agent.Application.Agents.Multi;
 using Hope.Agent.Application.Eventing;
 using Hope.Agent.Application.Notifications;
@@ -15,12 +16,18 @@ public sealed class ClinicalActivities
     private readonly IMultiAgentOrchestrator orchestrator;
     private readonly IEventPublisher publisher;
     private readonly IRealtimeNotifier notifier;
+    private readonly IWorkflowOutcomeSink? outcomeSink;
 
-    public ClinicalActivities(IMultiAgentOrchestrator orchestrator, IEventPublisher publisher, IRealtimeNotifier notifier)
+    public ClinicalActivities(
+        IMultiAgentOrchestrator orchestrator,
+        IEventPublisher publisher,
+        IRealtimeNotifier notifier,
+        IWorkflowOutcomeSink? outcomeSink = null)
     {
         this.orchestrator = orchestrator;
         this.publisher = publisher;
         this.notifier = notifier;
+        this.outcomeSink = outcomeSink;
     }
 
     [Activity]
@@ -38,6 +45,21 @@ public sealed class ClinicalActivities
             Priority: input.Priority);
 
         var result = await orchestrator.DispatchAsync(task, ct).ConfigureAwait(false);
+
+        // Record the outcome into the learning system (non-blocking — never throws to caller)
+        if (outcomeSink is not null)
+        {
+            var outcome = new WorkflowOutcome(
+                WorkflowType: input.Intent,
+                Intent: input.Intent,
+                Role: result.FinalRole,
+                Success: result.Trace.Count > 0 && result.Trace[^1].Success,
+                RewardSignal: result.Trace.Count > 0 && result.Trace[^1].Success ? 1.0 : 0.0,
+                CorrelationId: input.CorrelationId,
+                Context: input.Context is { Count: > 0 } ? input.Context : null);
+            _ = outcomeSink.RecordAsync(outcome, CancellationToken.None);
+        }
+
         return new AgentDispatchResult(result.TaskId, result.FinalRole, result.Output, result.Trace.Count);
     }
 

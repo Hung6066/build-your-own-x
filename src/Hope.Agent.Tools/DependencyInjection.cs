@@ -28,6 +28,9 @@ public static class DependencyInjection
 
         services.AddSingleton<IToolRegistry, ToolRegistry>();
 
+        // Adaptive MCMF cost hints — accumulates booking success rates at runtime
+        services.AddSingleton<IOptimizationCostHints, AdaptiveCostHints>();
+
         // MCP client: kết nối tới các MCP server bên ngoài
         services.Configure<McpOptions>(configuration.GetSection("Mcp"));
         services.AddHostedService<McpToolDiscoveryService>();

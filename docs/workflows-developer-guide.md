@@ -20,6 +20,14 @@
 10. [Hướng dẫn đăng ký DI](#10-hướng-dẫn-đăng-ký-di)
 11. [Thêm workflow mới (end-to-end)](#11-thêm-workflow-mới-end-to-end)
 12. [Quy tắc bắt buộc & ràng buộc thiết kế](#12-quy-tắc-bắt-buộc--ràng-buộc-thiết-kế)
+13. [Vòng Lặp Suy Luận Agentic](#13-vòng-lặp-suy-luận-agentic)
+    - 13.1–13.8 ReAct · Reflection · Adaptive Routing · Feedback Loop
+    - [13.9 Tree of Thoughts](#139-tree-of-thoughts)
+    - [13.10 MCMF Adaptive Costs](#1310-mcmf-adaptive-costs)
+    - [13.11 Cross-Workflow Patient Memory](#1311-cross-workflow-patient-memory)
+    - [13.12 Multi-hop Agent Handoffs](#1312-multi-hop-agent-handoffs)
+14. [Thêm workflow mới (end-to-end)](#11-thêm-workflow-mới-end-to-end)
+15. [Quy tắc bắt buộc & ràng buộc thiết kế](#12-quy-tắc-bắt-buộc--ràng-buộc-thiết-kế)
 
 ---
 
@@ -482,14 +490,14 @@ anomalyResult.Output  ──▶  exportCtx["anomalies"]
 
 ### Các role MultiAgent tổng quát — có thể khởi tạo workflow
 
-| Class               | `Name`         | Intent chính                                       |
-| ------------------- | -------------- | -------------------------------------------------- |
-| `SchedulingAgent`   | `scheduling`   | `schedule`, `appointment`, `reschedule`, `booking` |
-| `ClinicalAgent`     | `clinical`     | `diagnosis`, `triage`, `clinical_note`             |
-| `BillingAgent`      | `billing`      | `billing`, `insurance`, `coverage`, `claim`        |
-| `ComplianceAgent`   | `compliance`   | `audit`, `compliance`, `policy`                    |
-| `EmergencyAgent`    | `emergency`    | `emergency`, `critical`, `code_blue`               |
-| `NotificationAgent` | `notification` | `notify`, `alert`, `reminder`                      |
+| Class               | `Name`         | Intent chính                                       | Handoff được phát sinh                                             |
+| ------------------- | -------------- | -------------------------------------------------- | ------------------------------------------------------------------ |
+| `SchedulingAgent`   | `scheduling`   | `schedule`, `appointment`, `reschedule`, `booking` | → `optimization` khi không có slot khả dụng                        |
+| `ClinicalAgent`     | `clinical`     | `diagnosis`, `triage`, `clinical_note`             | → `emergency` khi phát hiện từ khóa cấp cứu trong output           |
+| `BillingAgent`      | `billing`      | `billing`, `insurance`, `coverage`, `claim`        | _(không phát sinh handoff)_                                        |
+| `ComplianceAgent`   | `compliance`   | `audit`, `compliance`, `policy`                    | → `clinical` khi phát hiện PHI violation, yêu cầu phản hồi an toàn |
+| `EmergencyAgent`    | `emergency`    | `emergency`, `critical`, `code_blue`               | → `notification` khi urgency level ≥ 4                             |
+| `NotificationAgent` | `notification` | `notify`, `alert`, `reminder`                      | _(không phát sinh handoff)_                                        |
 
 ---
 
@@ -696,6 +704,7 @@ Phân bổ N bệnh nhân vào M slot khả dụng bằng **Min-Cost Max-Flow** 
 - `+100` nếu specialty khác nhau
 - `+1` cho mỗi 15 phút chênh lệch so với `preferred_time_iso`
 - `-20 / -10` cho urgency `critical / high`
+- **`-0..15` (adaptive bonus)**: bác sĩ có lịch sử booking thành công cao được ưu tiên — `successRate ∈ [0.5, 1.0]` → bonus `∈ [0, 15]`. Xem §13.10.
 
 **Tích hợp workflow:** `AppointmentSchedulingWorkflow` Bước 3 — thay thế logic greedy cũ. `OptimizationAgent` nhận `slots_json` từ context (output của `HisSlotsAgent`), transform sang MCMF format, trả về assignment tốt nhất.
 
@@ -1147,3 +1156,575 @@ Tất cả 13 project đều có `<TreatWarningsAsErrors>true</TreatWarningsAsEr
 Workflow truyền dữ liệu giữa các bước qua `Dictionary<string, string>` trong `AgentDispatchInput.Context`. Tên key là quy ước chung — cần ghi rõ trong XML doc của class workflow khi thêm bước mới.
 
 **Không được** truyền binary blob hoặc chuỗi JSON lớn quá 64KB qua Context. Thay vào đó hãy lưu vào storage và truyền đường dẫn hoặc ID tham chiếu.
+
+---
+
+## 13. Vòng Lặp Suy Luận Agentic — Think → Act → Observe → Improve
+
+> **Câu hỏi gốc:** Làm sao workflow _suy nghĩ_, _chọn công cụ_, và _cải thiện theo thời gian_?
+
+Phần này giải thích kiến trúc agentic đầy đủ và các thành phần đã được implement.
+
+### 13.1 Vấn đề với "One-shot agent"
+
+Role cũ (trước khi có ReAct loop):
+
+```
+AgentTask → IAgentRole.HandleAsync() → tool.InvokeAsync() → AgentRoleResult
+                                              ↑
+                                    Cứng một tool, không loop
+```
+
+Nhược điểm:
+
+- Không thể chain nhiều bước (tra cứu → tính toán → format kết quả)
+- Không biết kết quả tệ → không tự sửa
+- LLM provider cố định → không học provider nào tốt hơn
+- Kết quả workflow thành công/thất bại không được ghi lại để cải thiện lần sau
+
+### 13.2 ReAct Loop — `IReActLoop`
+
+**Pattern:** Yao et al. (2022) _"ReAct: Synergizing Reasoning and Acting in Language Models"_
+
+```
+Loop (tối đa MaxIterations lần):
+  1. LLM phát sinh:  Thought: <lý do>
+                     Action: <tên tool>
+                     Action Input: <JSON args>
+
+  2. ReActLoop gọi tool, nhận Observation
+
+  3. Append "Observation: {output}" vào conversation history
+
+  4. LLM phát sinh lần tiếp (đã có thêm context)
+
+  Khi LLM phát sinh "Final Answer: ..." → kết thúc loop
+```
+
+**Files:**
+
+- Interface: `src/Hope.Agent.Application/Agents/ReAct/IReActLoop.cs`
+- Implementation: `src/Hope.Agent.MultiAgent/ReAct/ReActLoop.cs`
+- Đăng ký: `AddScoped<IReActLoop, ReActLoop>()` trong `MultiAgent.DependencyInjection`
+
+**Sử dụng trong role:**
+
+```csharp
+// ClinicalAgent tự động dùng ReAct nếu IReActLoop được inject
+internal sealed class ClinicalAgent(
+    IRetriever retriever,
+    ILLMRouter llm,
+    IReActLoop? reactLoop = null,   // nullable = optional
+    IReflector? reflector = null) : IAgentRole
+{
+    public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
+    {
+        if (reactLoop is not null)
+        {
+            var result = await reactLoop.RunAsync(task, [], new ReActOptions
+            {
+                MaxIterations = 5,
+                EnableReflection = reflector is not null,
+                SystemPromptSuffix = $"Clinical Guidelines:\n{ragContext}",
+            }, ct);
+            return new AgentRoleResult(Name, result.Success, result.FinalAnswer, ...);
+        }
+        // fallback: single-shot LLM call
+    }
+}
+```
+
+**Tùy chỉnh `ReActOptions`:**
+
+| Field                | Default | Ý nghĩa                                             |
+| -------------------- | ------- | --------------------------------------------------- |
+| `MaxIterations`      | 5       | Số vòng tối đa trước khi trả kết quả cuối cùng      |
+| `Temperature`        | 0.1     | Nhiệt độ LLM — thấp = nhất quán hơn                 |
+| `EnableReflection`   | false   | Bật/tắt Constitutional-AI critique sau Final Answer |
+| `SystemPromptSuffix` | null    | Thêm context cụ thể (RAG, hướng dẫn lâm sàng...)    |
+
+### 13.3 Self-Reflection — `IReflector`
+
+Sau khi ReAct trả `Final Answer` (hoặc `ClinicalAgent` one-shot), `IReflector.CritiqueAndRefineAsync` được gọi khi `EnableReflection = true`.
+
+**Cách hoạt động (`LlmReflector` trong LLMGateway):**
+
+```
+Input:  userMessage + draftAnswer
+Output: { score: 0..1, critique: "...", refined: "..." }
+
+→ score >= 0.6 → dùng refined answer
+→ score < 0.6  → cảnh báo log + vẫn dùng refined
+```
+
+`IReflector` đã được implement và đăng ký (`AddSingleton<IReflector, LlmReflector>()` trong `LLMGateway`). `ClinicalAgent` nhận nó qua optional injection.
+
+Metadata trả về cho người gọi:
+
+```
+result.Metadata["reflection_score"]   = "0.87"
+result.Metadata["reflection_critique"] = "Answer correctly cited sources..."
+```
+
+### 13.4 Adaptive Provider Selection — `IAdaptiveRouter`
+
+`ChiefMedicalAgent` sử dụng UCB1 multi-armed bandit để chọn LLM provider tối ưu cho mỗi intent.
+
+**Flow trong `SelectRoleAsync`:**
+
+```
+1. Gọi adaptiveRouter.SelectChatAsync(task.Intent)
+   → RouterChoice { Provider = "openai", Model = "gpt-4o" }  // provider từng hoạt động tốt nhất cho intent này
+
+2. Gọi llm.SelectChat(adaptiveChoice.Provider)
+   → IChatCompletionProvider
+
+3. Sau khi LLM trả kết quả:
+   adaptiveRouter.RecordOutcomeAsync(intent, provider, model, reward=1.0, latencyMs, failed=false)
+   → Bandit cập nhật ước lượng UCB1
+
+4. Nếu LLM thất bại:
+   adaptiveRouter.RecordOutcomeAsync(..., reward=0.0, failed=true)
+   → Provider đó giảm điểm UCB1
+```
+
+**Theo thời gian:** UCB1 tự động chuyển sang provider đáng tin cậy hơn cho mỗi loại intent lâm sàng, không cần cấu hình thủ công.
+
+### 13.5 Vòng Phản Hồi — `IWorkflowOutcomeSink`
+
+Mỗi lần `ClinicalActivities.DispatchAgentAsync` hoàn thành, outcome được ghi vào hệ thống học.
+
+**Files:**
+
+- Interface: `src/Hope.Agent.Application/Agents/IWorkflowOutcomeSink.cs`
+- Implementation: `src/Hope.Agent.MultiAgent/Learning/WorkflowOutcomeSink.cs`
+- Đăng ký: `AddScoped<IWorkflowOutcomeSink, WorkflowOutcomeSink>()`
+
+**Luồng:**
+
+```
+ClinicalActivities.DispatchAgentAsync()
+    ↓ role thực thi xong
+    ↓
+WorkflowOutcomeSink.RecordAsync(outcome)
+    ├── IFeedbackStore.RecordAsync(rating: +1/-1)
+    │        → DB row: intent, role, success/failure
+    └── ISkillLibrary.IncrementUsageAsync(skillId, rewardDelta)
+             → EMA reward update cho LearnedSkill
+```
+
+**Kết quả theo thời gian:**
+
+- Intent `"optimize_slots"` thường dẫn đến booking thành công → reward cao → `OptimizationAgent` được ưu tiên hơn
+- Intent `"clinical"` với một provider nhất định có latency tệ → adaptive router giảm điểm provider đó
+
+### 13.6 Sơ Đồ Tổng Thể — Các Vòng Lặp Cải Tiến
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                         TEMPORAL WORKFLOW                                     │
+│                                                                               │
+│  Step N ──→ DispatchAgentAsync(intent, input, context)                       │
+│                        │                                                      │
+│              ┌─────────▼──────────┐                                          │
+│              │  ChiefMedicalAgent │ ←── IAdaptiveRouter (UCB1 bandit)        │
+│              │  SelectRoleAsync() │     chọn LLM provider tối ưu/intent      │
+│              └─────────┬──────────┘                                          │
+│                        │  chọn role theo intent                               │
+│              ┌─────────▼────────────────────────────────────────────┐        │
+│              │  ClinicalAgent  (priority: ToT ▶ ReAct ▶ one-shot)   │        │
+│              │                                                        │        │
+│              │  ① IPatientMemoryService.RetrieveAsync()              │        │
+│              │       └─ Qdrant vector search: lịch sử bệnh nhân      │        │
+│              │              ↓ inject vào SystemPromptSuffix           │        │
+│              │                                                        │        │
+│              │  ② ITreeOfThoughts.RunAsync()  ──────────────────┐   │        │
+│              │       branch[0] ── ReActLoop ──────────┐          │   │        │
+│              │       branch[1] ── ReActLoop ──────────┼─ IJudge  │   │        │
+│              │       branch[2] ── ReActLoop ──────────┘  score   │   │        │
+│              │                                    best answer ◀──┘   │        │
+│              │                                                        │        │
+│              │  ③ Emergency keywords? ──→ AgentHandoff("emergency") │        │
+│              │                                                        │        │
+│              │  ④ IPatientMemoryService.WriteAsync()                 │        │
+│              │       └─ Qdrant upsert: ghi lại câu hỏi + câu trả lời │        │
+│              └────────────────────────────────────────────────────────┘        │
+│                        │                                                      │
+│              ┌─────────▼──────────────────────────────────────────┐          │
+│              │  WorkflowOutcomeSink  (fire-and-forget)             │          │
+│              │    ├─ IFeedbackStore.RecordAsync()    (rating ±1)   │          │
+│              │    ├─ ISkillLibrary.IncrementUsageAsync() (EMA)     │          │
+│              │    └─ IOptimizationCostHints.RecordOutcomeAsync()   │          │
+│              │         (booking intents → MCMF adaptive costs)     │          │
+│              └────────────────────────────────────────────────────┘          │
+└──────────────────────────────────────────────────────────────────────────────┘
+           ↑ Feedback loops tự động cải thiện hệ thống theo thời gian
+```
+
+### 13.7 Thêm ReAct vào Role Mới
+
+1. Inject `IReActLoop?` vào constructor của role
+2. Gọi `reactLoop.RunAsync(task, tools, opts, ct)` thay vì trực tiếp gọi tool
+3. Không cần đăng ký gì thêm — `IReActLoop` đã registered global
+
+```csharp
+// Ví dụ: role mới dùng ReAct
+internal sealed class MyNewRole(IToolRegistry tools, IReActLoop? reactLoop = null) : IAgentRole
+{
+    public string Name => "my_role";
+    public string Description => "Does X, Y, Z using available tools.";
+    public IReadOnlyList<string> Intents { get; } = ["intent_a", "intent_b"];
+
+    public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
+    {
+        var relevantTools = tools.All.Where(t => t.Definition.Name.StartsWith("my_")).ToList();
+
+        if (reactLoop is not null)
+        {
+            var result = await reactLoop.RunAsync(task, relevantTools,
+                new ReActOptions { MaxIterations = 3, EnableReflection = true }, ct);
+            return new AgentRoleResult(Name, result.Success, result.FinalAnswer,
+                new Dictionary<string, string> { ["steps"] = result.Steps.Count.ToString() });
+        }
+
+        // Fallback nếu ReAct chưa available
+        var tool = tools.Find("my_primary_tool")!;
+        var output = await tool.InvokeAsync(task.Input, new ToolInvocationContext(...), ct);
+        return new AgentRoleResult(Name, true, output);
+    }
+}
+```
+
+### 13.8 Tóm Tắt Tính Năng Agentic Đã Implement
+
+Tất cả 4 pattern nâng cao từ roadmap đã được implement đầy đủ:
+
+| Pattern                   | Interface                | Implementation         | Trạng thái    |
+| ------------------------- | ------------------------ | ---------------------- | ------------- |
+| **Tree of Thoughts**      | `ITreeOfThoughts`        | `TreeOfThoughtsSearch` | ✅ Hoàn thành |
+| **MCMF Adaptive Costs**   | `IOptimizationCostHints` | `AdaptiveCostHints`    | ✅ Hoàn thành |
+| **Cross-workflow Memory** | `IPatientMemoryService`  | `PatientMemoryService` | ✅ Hoàn thành |
+| **Multi-hop Handoffs**    | `AgentHandoff` (record)  | Populated trong roles  | ✅ Hoàn thành |
+
+Chi tiết từng pattern: xem §13.9 – §13.12.
+
+---
+
+### 13.9 Tree of Thoughts — `ITreeOfThoughts`
+
+**Pattern:** Yao et al. (2023) _"Tree of Thoughts: Deliberate Problem Solving with Large Language Models"_
+
+Thay vì một chuỗi suy luận tuyến tính (ReAct), Tree of Thoughts tạo **N nhánh song song** rồi chọn nhánh tốt nhất theo điểm `IJudge`.
+
+#### Luồng hoạt động
+
+```
+ITreeOfThoughts.RunAsync(task, tools, ToTOptions)
+        │
+        ├─ Task.WhenAll: chạy BranchCount ReActLoop song song
+        │       branch[0]: ReActLoop.RunAsync(temp=0.7) → FinalAnswer_0
+        │       branch[1]: ReActLoop.RunAsync(temp=0.7) → FinalAnswer_1
+        │       branch[2]: ReActLoop.RunAsync(temp=0.7) → FinalAnswer_2
+        │
+        ├─ Task.WhenAll: IJudge.ScoreAsync cho từng nhánh
+        │       JudgeVerdict { Score: 0..1, Passed, Reasoning }
+        │
+        └─ Trả về nhánh có Score cao nhất → ToTResult.BestAnswer
+```
+
+Temperature cao hơn (`0.7` mặc định so với `0.2` của ReAct) tạo ra **diversity** giữa các nhánh — nhánh 1 có thể dùng cách tiếp cận bệnh học, nhánh 2 dùng hướng dẫn điều trị, nhánh 3 ưu tiên phân tích rủi ro.
+
+#### Interface
+
+```csharp
+// src/Hope.Agent.Application/Agents/ReAct/ITreeOfThoughts.cs
+public interface ITreeOfThoughts
+{
+    Task<ToTResult> RunAsync(
+        AgentTask task,
+        IReadOnlyList<IAgentTool> availableTools,
+        ToTOptions? options = null,
+        CancellationToken ct = default);
+}
+
+public sealed class ToTOptions
+{
+    public int BranchCount { get; init; } = 3;       // số nhánh song song
+    public int MaxStepsPerBranch { get; init; } = 3;  // ReAct iterations/nhánh
+    public float Temperature { get; init; } = 0.7f;   // cao = đa dạng hơn
+    public string? SystemPromptSuffix { get; init; }
+}
+
+public sealed record ToTResult(
+    bool Success,
+    string BestAnswer,
+    IReadOnlyList<ToTBranch> Branches,
+    int WinnerBranchIndex,
+    double WinnerScore);
+
+public sealed record ToTBranch(
+    int Index, string Answer, double Score, bool Passed,
+    string JudgeReasoning, int StepCount);
+```
+
+#### Tích hợp với ClinicalAgent
+
+`ClinicalAgent` sử dụng priority hierarchy:
+
+```
+ToT available?  → dùng ToT     (chất lượng cao nhất, chi phí tính toán cao nhất)
+ReAct available?→ dùng ReAct   (trung bình)
+else            → one-shot LLM (nhanh nhất, cơ bản nhất)
+```
+
+```csharp
+// Mỗi path đều inject patient memory context qua SystemPromptSuffix
+if (treeOfThoughts is not null)
+{
+    var totResult = await treeOfThoughts.RunAsync(task, [], new ToTOptions
+    {
+        BranchCount = 3, MaxStepsPerBranch = 3, Temperature = 0.6f,
+        SystemPromptSuffix = contextSuffix,
+    }, ct);
+    citations["tot_branches"]     = totResult.Branches.Count.ToString();
+    citations["tot_winner_score"] = totResult.WinnerScore.ToString("F2");
+}
+```
+
+#### Metadata trả về
+
+| Key                   | Ý nghĩa                                  |
+| --------------------- | ---------------------------------------- |
+| `tot_branches`        | Số nhánh đã khám phá                     |
+| `tot_winner_score`    | Điểm IJudge của nhánh thắng (0..1)       |
+| `react_steps`         | Tổng số bước ReAct (nếu dùng path ReAct) |
+| `reflection_critique` | Nội dung critique nếu bật reflection     |
+
+#### Đăng ký DI
+
+```csharp
+// MultiAgent/DependencyInjection.cs (đã có)
+services.AddScoped<ITreeOfThoughts, TreeOfThoughtsSearch>();
+```
+
+`IJudge` được inject từ `LLMGateway` (singleton). `IReActLoop` được inject từ `MultiAgent` (scoped). Mỗi nhánh gọi `reactLoop` độc lập — không có shared state.
+
+---
+
+### 13.10 MCMF Adaptive Costs — `IOptimizationCostHints`
+
+MCMF cost function truyền thống chỉ dùng **thông tin tĩnh** (specialty, wait time, urgency). Với adaptive costs, bác sĩ có lịch sử booking thành công cao được ưu tiên qua **cost thấp hơn** trong graph MCMF.
+
+#### Thuật toán EMA
+
+```
+Khi booking kết thúc (via WorkflowOutcomeSink):
+    key = "{doctorId}:{specialty}"
+    EMA_new = EMA_prev + α × (outcome - EMA_prev)
+    α = 0.3  (≈ 3-4 sample để half-life decay)
+
+Khi tính cost cạnh:
+    successRate = EMA(key)  // default = 0.85 nếu chưa có data
+    bonus = round((successRate - 0.5) × 30)  // 0..15 points
+    edgeCost -= max(0, bonus)
+```
+
+Ví dụ thực tế:
+
+- Bác sĩ A: 95% booking thành công → bonus = `(0.95-0.5)×30 = 13.5 ≈ 14` → cost giảm 14
+- Bác sĩ B: 60% booking thành công → bonus = `(0.60-0.5)×30 = 3` → cost giảm 3
+- Bác sĩ C: chưa có data → default 85% → bonus = `(0.85-0.5)×30 = 10.5 ≈ 11` → cost giảm 11
+
+#### Interface
+
+```csharp
+// src/Hope.Agent.Application/Tools/IOptimizationCostHints.cs
+public interface IOptimizationCostHints
+{
+    Task RecordOutcomeAsync(string doctorId, string specialty, bool succeeded, CancellationToken ct);
+    Task<double> GetSuccessRateAsync(string doctorId, string specialty,
+        double defaultRate = 0.85, CancellationToken ct = default);
+}
+```
+
+#### Vòng phản hồi hoàn chỉnh
+
+```
+AppointmentSchedulingWorkflow
+    → Bước 4 (his_booking) hoàn thành
+    → ClinicalActivities ghi WorkflowOutcome { Intent="his_booking", Context={doctor_id, specialty} }
+    → WorkflowOutcomeSink.RecordAsync()
+         └─ IOptimizationCostHints.RecordOutcomeAsync(doctorId, specialty, success)
+              └─ EMA update trong AdaptiveCostHints
+
+Lần đặt lịch tiếp theo:
+    → OptimizeBatchAppointmentsTool pre-fetch rates
+    → ComputeEdgeCost nhận successRate mới → ưu tiên bác sĩ đã chứng minh năng lực
+```
+
+**Intents kích hoạt recording:** `his_booking`, `optimize_slots`, `schedule`. Context phải chứa key `doctor_id` (hoặc `doctor`) và `specialty`.
+
+#### Lưu ý về persistence
+
+`AdaptiveCostHints` là **in-memory**. Statistics reset khi restart. Để persist:
+
+1. Thay `AdaptiveCostHints` bằng `EfAdaptiveCostHints` (EF Core backed)
+2. Đăng ký trong DI: `services.AddSingleton<IOptimizationCostHints, EfAdaptiveCostHints>()`
+3. Không cần thay đổi interface hay `OptimizeBatchAppointmentsTool`
+
+#### Đăng ký DI
+
+```csharp
+// Tools/DependencyInjection.cs (đã có)
+services.AddSingleton<IOptimizationCostHints, AdaptiveCostHints>();
+```
+
+Singleton vì EMA state phải tích lũy qua nhiều request scope.
+
+---
+
+### 13.11 Cross-Workflow Patient Memory — `IPatientMemoryService`
+
+Mỗi workflow run là stateless — không biết bệnh nhân này đã được chẩn đoán gì trong lần khám trước. `IPatientMemoryService` giải quyết vấn đề này bằng **vector memory** qua Qdrant.
+
+#### Luồng ghi/đọc
+
+```
+Trước khi ClinicalAgent reasoning:
+    IPatientMemoryService.RetrieveAsync(patientId, query=task.Input, topK=3)
+        → embed query (IEmbeddingProvider)
+        → IMemoryStore.SearchAsync(patientId, embedding, topK, MemoryKind.Clinical)
+        → trả về List<string> content, sorted by similarity
+        → inject vào SystemPromptSuffix: "Previous patient history:\n1. ...\n2. ..."
+
+Sau khi ClinicalAgent hoàn thành:
+    IPatientMemoryService.WriteAsync(patientId, "Q: {input}\nA: {answer[..500]}")
+        → embed content (IEmbeddingProvider)
+        → IMemoryStore.UpsertAsync(MemoryRecord { UserId=patientId, Kind=Clinical }, embedding)
+        → Qdrant upsert (idempotent)
+```
+
+#### Interface
+
+```csharp
+// src/Hope.Agent.Application/Agents/IPatientMemoryService.cs
+public interface IPatientMemoryService
+{
+    Task WriteAsync(Guid patientId, string content,
+        MemoryKind kind = MemoryKind.Clinical, float importance = 0.7f,
+        CancellationToken ct = default);
+
+    Task<IReadOnlyList<string>> RetrieveAsync(Guid patientId, string query,
+        int topK = 3, CancellationToken ct = default);
+}
+```
+
+#### MemoryRecord domain entity
+
+```csharp
+// src/Hope.Agent.Domain/Memory/MemoryRecord.cs
+public sealed class MemoryRecord
+{
+    public Guid Id { get; init; }        // Guid.CreateVersion7()
+    public Guid UserId { get; init; }    // = patientId
+    public MemoryKind Kind { get; init; }// Clinical = 3
+    public string Content { get; init; }
+    public float Importance { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
+public enum MemoryKind { Episodic=0, Semantic=1, Procedural=2, Clinical=3 }
+```
+
+#### Yêu cầu cơ sở hạ tầng
+
+`PatientMemoryService` yêu cầu **Qdrant** chạy và có collection `clinical_memories`. Nếu Qdrant không khả dụng, mọi exception đều bị swallow — `ClinicalAgent` vẫn hoạt động bình thường, chỉ thiếu patient history context.
+
+#### Nội dung được ghi vào memory
+
+Content bị giới hạn 500 ký tự để tránh oversized vector embedding:
+
+```csharp
+var summary = answer.Length > 500 ? answer[..500] : answer;
+_ = patientMemory.WriteAsync(task.UserId, $"Q: {task.Input}\nA: {summary}", ct: ct);
+```
+
+#### Đăng ký DI
+
+```csharp
+// MultiAgent/DependencyInjection.cs (đã có)
+services.AddScoped<IPatientMemoryService, PatientMemoryService>();
+```
+
+`IEmbeddingProvider` và `IMemoryStore` đã được đăng ký trong `Infrastructure` và `LLMGateway` — không cần thêm gì.
+
+---
+
+### 13.12 Multi-hop Agent Handoffs
+
+`ChiefMedicalAgent` đã xử lý handoffs từ trước — loop tối đa 4 hops:
+
+```csharp
+// ChiefMedicalAgent.DispatchAsync (đã có, không cần thay đổi)
+if (result.Handoffs is { Count: > 0 } && hop < 3)
+{
+    var next = result.Handoffs[0];
+    if (_byName.TryGetValue(next.TargetRole, out var nextRole))
+    {
+        currentTask = currentTask with { Intent = next.TargetRole, Input = next.Payload };
+        current = nextRole;
+        continue;   // vòng lặp hop tiếp theo
+    }
+}
+```
+
+Phần mới: các role giờ **tự populate** field `Handoffs` dựa trên nội dung output của mình.
+
+#### Bảng handoff theo role
+
+| Role              | Điều kiện phát sinh handoff       | Target         | Reason                                                       | Payload        |
+| ----------------- | --------------------------------- | -------------- | ------------------------------------------------------------ | -------------- |
+| `ClinicalAgent`   | Output chứa từ khóa cấp cứu       | `emergency`    | `"Clinical reasoning detected: {keyword}"`                   | Full answer    |
+| `ComplianceAgent` | PHI markers được phát hiện        | `clinical`     | `"Compliance blocked: {markers}. Provide safe alternative."` | Original input |
+| `SchedulingAgent` | Tool trả về no-slot / unavailable | `optimization` | `"No standard slot; request MCMF optimization"`              | Original input |
+| `EmergencyAgent`  | Urgency level ≥ 4                 | `notification` | `"high-urgency triage"`                                      | Full response  |
+
+#### Từ khóa phát hiện cấp cứu (ClinicalAgent)
+
+```csharp
+private static readonly string[] EmergencyMarkers =
+[
+    "stroke", "đột quỵ",
+    "myocardial infarction", "nhồi máu cơ tim", "heart attack",
+    "sepsis", "nhiễm khuẩn huyết",
+    "cardiac arrest", "ngừng tim",
+    "respiratory failure", "suy hô hấp",
+    "code blue", "cấp cứu ngay",
+    "immediate emergency", "life-threatening",
+];
+```
+
+Matching: `answer.Contains(marker, StringComparison.OrdinalIgnoreCase)` — không phân biệt hoa thường, không phân biệt ngôn ngữ (Anh/Việt cả hai).
+
+#### Ví dụ luồng multi-hop
+
+```
+AgentTask(intent="clinical", input="bệnh nhân đau ngực dữ dội kèm vã mồ hôi")
+    │
+    ▼  ClinicalAgent trả lời: "...có thể là nhồi máu cơ tim cấp — cần cấp cứu ngay..."
+    │  → phát hiện "nhồi máu cơ tim" → AgentHandoff(target="emergency", ...)
+    │
+    ▼  hop 1: ChiefMedicalAgent chuyển sang EmergencyAgent
+              input = full clinical answer (Payload)
+    │
+    ▼  EmergencyAgent: "level=5, route=er" → level≥4 → AgentHandoff(target="notification")
+    │
+    ▼  hop 2: ChiefMedicalAgent chuyển sang NotificationAgent
+              → gửi cảnh báo khẩn cấp qua IEventPublisher + IRealtimeNotifier
+    │
+    ▼  Kết thúc — trả về trace đầy đủ 3 role trong AgentDispatchResult
+```
+
+#### Ghi chú về payload
+
+`AgentHandoff.Payload` truyền **toàn bộ output** của role nguồn (không chỉ tóm tắt). Role đích có thể dùng đây như input. Giới hạn: không truyền binary hoặc JSON > 64KB qua Payload (xem quy tắc §12).

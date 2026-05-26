@@ -1,10 +1,15 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Hope.Agent.Application.Agents;
 using Hope.Agent.Application.Agents.Multi;
+using Hope.Agent.Application.Agents.ReAct;
+using Hope.Agent.Application.Governance;
+using Hope.Agent.Application.Learning;
 using Hope.Agent.Application.LLM;
 using Hope.Agent.Application.Rag;
 using Hope.Agent.Application.Tools;
+using Microsoft.Extensions.Options;
 
 namespace Hope.Agent.MultiAgent.Roles;
 
@@ -27,35 +32,140 @@ internal sealed class SchedulingAgent(IToolRegistry tools) : IAgentRole
             reason = task.Input,
         });
         var output = await tool.InvokeAsync(args, ctx, ct);
+
+        // If the scheduler found no available slot, hand off to the MCMF optimizer for retry
+        if (output.Contains("\"success\":false", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("no_slot", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("unavailable", StringComparison.OrdinalIgnoreCase))
+        {
+            return new AgentRoleResult(Name, false, output, null,
+                [new AgentHandoff("optimization", "Standard scheduling found no available slot; request MCMF optimization", task.Input)]);
+        }
+
         return new AgentRoleResult(Name, true, output);
     }
 }
 
-internal sealed class ClinicalAgent(IRetriever retriever, ILLMRouter llm) : IAgentRole
+internal sealed class ClinicalAgent(
+    IRetriever retriever,
+    ILLMRouter llm,
+    IReActLoop? reactLoop = null,
+    IReflector? reflector = null,
+    ITreeOfThoughts? treeOfThoughts = null,
+    IPatientMemoryService? patientMemory = null,
+    IOptions<GovernancePolicyOptions>? governanceOptions = null) : IAgentRole
 {
+    // Emergency triggers loaded from GovernancePolicyOptions (externalised from hard-coded array).
+    // Falls back to a minimal built-in list only when governance options are not registered.
+    private static readonly string[] _defaultEmergencyTriggers =
+    [
+        "stroke", "cardiac arrest", "respiratory failure", "code blue",
+    ];
+
+    private string[] EmergencyTriggers =>
+        governanceOptions?.Value.EmergencyTriggers ?? _defaultEmergencyTriggers;
+
     public string Name => "clinical";
     public string Description => "Clinical reasoning, guideline retrieval, drug interaction triage.";
     public IReadOnlyList<string> Intents { get; } = ["clinical", "diagnosis", "reasoning", "guideline", "drug_interaction"];
 
     public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
     {
+        // Retrieve cross-workflow patient memory (non-blocking; enriches reasoning context)
+        var memoryContext = string.Empty;
+        if (patientMemory is not null && task.UserId != Guid.Empty)
+        {
+            var memories = await patientMemory.RetrieveAsync(task.UserId, task.Input, topK: 3, ct);
+            if (memories.Count > 0)
+                memoryContext = "Previous patient history:\n" + string.Join("\n", memories.Select((m, i) => $"{i + 1}. {m}")) + "\n\n";
+        }
+
+        // Retrieve relevant clinical guidelines (always — provides grounding for all paths)
         var hits = await retriever.SearchAsync(new RetrievalQuery(task.Input, "clinical_guidelines", TopK: 8, FinalK: 4), ct);
         var ctxBlock = new StringBuilder();
+        if (memoryContext.Length > 0) ctxBlock.Append(memoryContext);
         foreach (var h in hits)
-        {
             ctxBlock.Append("[Source: ").Append(h.Title).Append("] ").AppendLine(h.Content);
-        }
-        var chat = llm.SelectChat();
-        var resp = await chat.CompleteAsync(new ChatRequest(
-            [
-                new ChatMessage("system", "You are a clinical reasoning assistant. Ground every claim in the supplied context. If context is insufficient, say so explicitly. Never invent dosages."),
-                new ChatMessage("user", $"Context:\n{ctxBlock}\n\nQuestion: {task.Input}"),
-            ],
-            Temperature: 0.2f), ct);
-        return new AgentRoleResult(Name, true, resp.Content, new Dictionary<string, string>
+
+        var citations = new Dictionary<string, string>
         {
             ["citations"] = JsonSerializer.Serialize(hits.Select(h => new { h.Title, h.Url, h.Score })),
-        });
+        };
+
+        var contextSuffix = ctxBlock.Length > 0 ? $"Clinical Context:\n{ctxBlock}" : null;
+        string answer;
+
+        // Path 1: Tree of Thoughts — parallel multi-branch exploration (highest quality)
+        if (treeOfThoughts is not null)
+        {
+            var totOpts = new ToTOptions
+            {
+                BranchCount = 3,
+                MaxStepsPerBranch = 3,
+                Temperature = 0.6f,
+                SystemPromptSuffix = contextSuffix,
+            };
+            var totResult = await treeOfThoughts.RunAsync(task, [], totOpts, ct);
+            answer = totResult.BestAnswer;
+            citations["tot_branches"] = totResult.Branches.Count.ToString(CultureInfo.InvariantCulture);
+            citations["tot_winner_score"] = totResult.WinnerScore.ToString("F2", CultureInfo.InvariantCulture);
+        }
+        // Path 2: ReAct — iterative multi-step reasoning
+        else if (reactLoop is not null)
+        {
+            var opts = new ReActOptions
+            {
+                MaxIterations = 5,
+                Temperature = 0.2f,
+                EnableReflection = reflector is not null,
+                SystemPromptSuffix = contextSuffix,
+            };
+            var result = await reactLoop.RunAsync(task, [], opts, ct);
+            answer = result.FinalAnswer;
+            citations["react_steps"] = result.Steps.Count.ToString(CultureInfo.InvariantCulture);
+            if (result.ReflectionCritique is { Length: > 0 } critique)
+                citations["reflection_critique"] = critique;
+        }
+        // Path 3: One-shot LLM with RAG context
+        else
+        {
+            var chat = llm.SelectChat();
+            var resp = await chat.CompleteAsync(new ChatRequest(
+                [
+                    new ChatMessage("system", "You are a clinical reasoning assistant. Ground every claim in the supplied context. If context is insufficient, say so explicitly. Never invent dosages."),
+                    new ChatMessage("user", $"Context:\n{ctxBlock}\n\nQuestion: {task.Input}"),
+                ],
+                Temperature: 0.2f), ct);
+            answer = resp.Content;
+
+            if (reflector is not null)
+            {
+                try
+                {
+                    var reflection = await reflector.CritiqueAndRefineAsync(task.Input, answer, ct);
+                    answer = reflection.RefinedAnswer;
+                    citations["reflection_score"] = reflection.Score.ToString("F2", CultureInfo.InvariantCulture);
+                    citations["reflection_critique"] = reflection.Critique;
+                }
+                catch { /* reflection is non-blocking */ }
+            }
+        }
+
+        // Persist outcome as patient memory for future cross-workflow recall (non-blocking)
+        if (patientMemory is not null && task.UserId != Guid.Empty && !string.IsNullOrWhiteSpace(answer))
+        {
+            var summary = answer.Length > 500 ? answer[..500] : answer;
+            _ = patientMemory.WriteAsync(task.UserId, $"Q: {task.Input}\nA: {summary}", ct: ct);
+        }
+
+        // Emergency detection: if the answer mentions a life-threatening condition, hand off immediately.
+        // EmergencyTriggers are loaded from GovernancePolicyOptions (not hard-coded).
+        IReadOnlyList<AgentHandoff>? handoffs = null;
+        var matched = EmergencyTriggers.FirstOrDefault(m => answer.Contains(m, StringComparison.OrdinalIgnoreCase));
+        if (matched is not null)
+            handoffs = [new AgentHandoff("emergency", $"Clinical reasoning detected potential emergency: {matched}", answer)];
+
+        return new AgentRoleResult(Name, true, answer, citations, handoffs);
     }
 }
 
@@ -80,26 +190,40 @@ internal sealed class BillingAgent(IToolRegistry tools) : IAgentRole
     }
 }
 
-internal sealed class ComplianceAgent : IAgentRole
+internal sealed class ComplianceAgent(IGovernanceGate? gate = null) : IAgentRole
 {
     public string Name => "compliance";
     public string Description => "Validates PHI handling, RBAC, and policy adherence before downstream actions.";
     public IReadOnlyList<string> Intents { get; } = ["compliance", "hipaa", "phi", "policy"];
 
-    private static readonly string[] PhiMarkers = ["ssn", "social security", "credit card", "passport"];
+    // Fallback patterns used only when IGovernanceGate is not registered in DI.
+    private static readonly string[] _fallbackPhiMarkers = ["ssn", "social security", "credit card", "passport"];
 
     public Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
     {
-        var lower = task.Input.ToLowerInvariant();
-        var violations = PhiMarkers.Where(p => lower.Contains(p, StringComparison.Ordinal)).ToList();
+        // AGT-backed PHI scan via PromptInjectionDetector with CustomPatterns = PhiMarkers.
+        // Falls back to a simple string-contains check when gate is not registered.
+        IReadOnlyList<string> violations = gate is not null
+            ? gate.ScanForForbiddenPatterns(task.Input)
+            : _fallbackPhiMarkers.Where(p =>
+                task.Input.Contains(p, StringComparison.OrdinalIgnoreCase)).ToList();
+
         var success = violations.Count == 0;
         var output = success
             ? "compliance:ok"
             : $"compliance:blocked markers={string.Join(',', violations)}";
+
+        // Emit handoff to clinical agent so it can provide a safe alternative response
+        IReadOnlyList<AgentHandoff>? handoffs = violations.Count > 0
+            ? [new AgentHandoff("clinical",
+                $"Compliance blocked due to PHI markers: {string.Join(", ", violations)}. Please provide a safe, de-identified alternative.",
+                task.Input)]
+            : null;
+
         return Task.FromResult(new AgentRoleResult(Name, success, output, new Dictionary<string, string>
         {
             ["violations"] = string.Join(',', violations),
-        }));
+        }, handoffs));
     }
 }
 

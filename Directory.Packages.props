@@ -5,33 +5,27 @@
   </PropertyGroup>
   <ItemGroup>
     <!-- ASP.NET Core / Hosting -->
+    <PackageVersion Include="Microsoft.AgentGovernance" Version="3.7.0" />
     <PackageVersion Include="Microsoft.AspNetCore.OpenApi" Version="9.0.0" />
     <PackageVersion Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="9.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Http.Resilience" Version="9.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="9.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Diagnostics.HealthChecks" Version="9.0.0" />
-
     <!-- YARP Gateway -->
     <PackageVersion Include="Yarp.ReverseProxy" Version="2.2.0" />
-
     <!-- EF Core / Postgres -->
     <PackageVersion Include="Microsoft.EntityFrameworkCore" Version="9.0.0" />
     <PackageVersion Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.0" />
     <PackageVersion Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.0" />
-
     <!-- Redis -->
     <PackageVersion Include="StackExchange.Redis" Version="2.8.16" />
-
     <!-- Qdrant -->
     <PackageVersion Include="Qdrant.Client" Version="1.12.0" />
-
     <!-- Kafka -->
     <PackageVersion Include="Confluent.Kafka" Version="2.6.0" />
-
     <!-- Neo4j (knowledge graph) -->
     <PackageVersion Include="Neo4j.Driver" Version="5.26.0" />
-
     <!-- Observability -->
     <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="1.15.3" />
     <PackageVersion Include="OpenTelemetry.Instrumentation.AspNetCore" Version="1.15.2" />
@@ -40,30 +34,23 @@
     <PackageVersion Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" Version="1.15.3" />
     <PackageVersion Include="Serilog.AspNetCore" Version="9.0.0" />
     <PackageVersion Include="Serilog.Sinks.OpenTelemetry" Version="4.1.1" />
-
     <!-- Validation / Mediator-lite -->
     <PackageVersion Include="FluentValidation" Version="11.10.0" />
     <PackageVersion Include="Polly" Version="8.4.2" />
-
     <!-- Temporal (durable workflows) -->
     <PackageVersion Include="Temporalio" Version="1.14.1" />
     <PackageVersion Include="Temporalio.Extensions.Hosting" Version="1.14.1" />
-
     <!-- Semantic Kernel (agent planning, tool calling) -->
     <PackageVersion Include="Microsoft.SemanticKernel" Version="1.30.0" />
     <PackageVersion Include="Microsoft.SemanticKernel.Connectors.OpenAI" Version="1.30.0" />
     <PackageVersion Include="Microsoft.SemanticKernel.Connectors.Google" Version="1.30.0-alpha" />
-
     <!-- MCP (Model Context Protocol) -->
     <PackageVersion Include="ModelContextProtocol" Version="1.0.0" />
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="1.0.0" />
-
     <!-- HTTP clients -->
     <PackageVersion Include="System.Text.Json" Version="10.0.3" />
-
     <!-- Telegram Bot -->
     <PackageVersion Include="Telegram.Bot" Version="22.10.0.1" />
-
     <!-- Testing -->
     <PackageVersion Include="xunit" Version="2.9.2" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.0.0" />

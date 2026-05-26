@@ -3,6 +3,7 @@
     <ProjectReference Include="..\Hope.Agent.Application\Hope.Agent.Application.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.AgentGovernance" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
   </ItemGroup>
 </Project>

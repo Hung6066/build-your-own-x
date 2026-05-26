@@ -7,6 +7,7 @@ using Hope.Agent.Domain.Personalization;
 using Hope.Agent.Domain.Rag;
 using Hope.Agent.Domain.Security;
 using Hope.Agent.Domain.Tasks;
+using Hope.Agent.Domain.Training;
 using Hope.Agent.Domain.UserModeling;
 using Microsoft.EntityFrameworkCore;
 
@@ -34,6 +35,8 @@ public sealed class AgentDbContext(DbContextOptions<AgentDbContext> options) : D
     public DbSet<UserPreference> UserPreferences => Set<UserPreference>();
     public DbSet<ConversationSummary> ConversationSummaries => Set<ConversationSummary>();
     public DbSet<KanbanTask> KanbanTasks => Set<KanbanTask>();
+    public DbSet<PreferenceRecord> PreferenceRecords => Set<PreferenceRecord>();
+    public DbSet<FinetuneJob> FinetuneJobs => Set<FinetuneJob>();
 
     protected override void OnModelCreating(ModelBuilder b)
     {
@@ -241,6 +244,35 @@ public sealed class AgentDbContext(DbContextOptions<AgentDbContext> options) : D
             e.HasIndex(x => new { x.Column, x.UpdatedAt });
             e.HasIndex(x => x.UserId);
             e.HasIndex(x => x.PatientRef);
+        });
+
+        b.Entity<PreferenceRecord>(e =>
+        {
+            e.ToTable("preference_records");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Prompt).HasColumnType("text");
+            e.Property(x => x.ChosenResponse).HasColumnType("text");
+            e.Property(x => x.RejectedResponse).HasColumnType("text");
+            e.Property(x => x.Rationale).HasColumnType("text");
+            e.Property(x => x.ChosenProvider).HasMaxLength(64);
+            e.Property(x => x.RejectedProvider).HasMaxLength(64);
+            e.Property(x => x.Specialty).HasMaxLength(128);
+            e.HasIndex(x => new { x.CreatedAt, x.Specialty });
+            e.HasIndex(x => x.ConversationId);
+        });
+
+        b.Entity<FinetuneJob>(e =>
+        {
+            e.ToTable("finetune_jobs");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.BaseModel).HasMaxLength(256);
+            e.Property(x => x.OutputModelTag).HasMaxLength(256);
+            e.Property(x => x.RemoteJobId).HasMaxLength(256);
+            e.Property(x => x.ProgressJson).HasColumnType("jsonb");
+            e.Property(x => x.ErrorDetail).HasColumnType("text");
+            e.Property(x => x.Status).HasConversion<int>();
+            e.Property(x => x.JobType).HasConversion<int>();
+            e.HasIndex(x => new { x.Status, x.CreatedAt });
         });
     }
 }

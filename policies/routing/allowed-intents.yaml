@@ -1,0 +1,43 @@
+apiVersion: governance.toolkit/v1
+name: intent-routing-policy
+default_action: deny
+rules:
+  - name: allow-clinical-intents
+    condition: "action.type in ['clinical', 'diagnosis', 'reasoning', 'guideline', 'drug_interaction']"
+    action: allow
+    description: "Clinical reasoning and guideline lookup intents"
+
+  - name: allow-scheduling-intents
+    condition: "action.type in ['scheduling', 'schedule', 'appointment', 'reschedule', 'booking', 'his_booking', 'his_slots', 'specialty_routing']"
+    action: allow
+    description: "Appointment booking and scheduling intents"
+
+  - name: allow-billing-intents
+    condition: "action.type in ['billing', 'insurance', 'coverage', 'claim']"
+    action: allow
+    description: "Billing and insurance verification intents"
+
+  - name: allow-compliance-intents
+    condition: "action.type in ['compliance', 'hipaa', 'phi', 'policy', 'audit', 'audit_collect', 'audit_analyze', 'audit_narrate', 'audit_export']"
+    action: allow
+    description: "Compliance, PHI, and audit workflow intents"
+
+  - name: allow-emergency-intents
+    condition: "action.type in ['emergency', 'triage', 'stroke', 'icu', 'urgent', 'critical', 'code_blue']"
+    action: allow
+    description: "Emergency triage and escalation intents"
+
+  - name: allow-notification-intents
+    condition: "action.type in ['notification', 'notify', 'alert', 'message', 'reminder']"
+    action: allow
+    description: "Patient and staff notification intents"
+
+  - name: allow-optimization-intents
+    condition: "action.type in ['optimization', 'optimize', 'optimize_slots']"
+    action: allow
+    description: "MCMF slot optimisation intents"
+
+  - name: allow-medication-intents
+    condition: "action.type in ['medication_lookup', 'medication', 'prescription', 'drug']"
+    action: allow
+    description: "Medication lookup and reminder intents"

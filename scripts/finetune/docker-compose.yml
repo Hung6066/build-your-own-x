@@ -1,0 +1,38 @@
+services:
+  hope-finetune:
+    build: .
+    image: hope-finetune:latest
+    container_name: hope-finetune
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    env_file:
+      - .env
+    environment:
+      HOPE_FT_HOST: 0.0.0.0
+      HOPE_FT_PORT: "8765"
+      HOPE_FT_WORKDIR: /var/lib/hope-finetune
+      HOPE_FT_DB_PATH: /var/lib/hope-finetune/registry.db
+      HOPE_FT_DATA_DIR: /var/lib/hope-finetune/data
+      HOPE_FT_ADAPTERS_DIR: /var/lib/hope-finetune/adapters
+      HOPE_FT_LOGS_DIR: /var/lib/hope-finetune/logs
+    volumes:
+      - hope_finetune_state:/var/lib/hope-finetune
+      - hf_cache:/home/hope/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8765/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  hope_finetune_state:
+  hf_cache:

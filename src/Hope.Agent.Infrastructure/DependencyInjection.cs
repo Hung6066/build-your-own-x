@@ -5,6 +5,7 @@ using Hope.Agent.Application.Eventing;
 using Hope.Agent.Application.Insights;
 using Hope.Agent.Application.Knowledge;
 using Hope.Agent.Application.Learning;
+using Hope.Agent.Application.Governance;
 using Hope.Agent.Application.Personalization;
 using Hope.Agent.Application.Rag;
 using Hope.Agent.Application.Security;
@@ -64,7 +65,12 @@ public static class DependencyInjection
         services.AddSingleton<IEventConsumer, KafkaEventConsumer>();
 
         services.AddSingleton<IPhiRedactor, RegexPhiRedactor>();
-        services.AddSingleton<IPromptShield, HeuristicPromptShield>();
+        // Phase 2 — AGT layered shield: heuristic inner + AGT ML outer.
+        // HeuristicPromptShield registered as concrete so AgtPromptShield can inject it.
+        services.AddOptions<GovernancePolicyOptions>()
+            .BindConfiguration(GovernancePolicyOptions.SectionName);
+        services.AddSingleton<HeuristicPromptShield>();
+        services.AddSingleton<IPromptShield, AgtPromptShield>();
         services.AddSingleton<IOutputShield, RegexOutputShield>();
         // NemoClaw-inspired security rails
         services.AddSingleton<ISsrfGuard, HeuristicSsrfGuard>();
@@ -132,6 +138,13 @@ public static class DependencyInjection
         // Phase 12 — trajectory export for fine-tuning.
         services.Configure<TrajectoryExportOptions>(cfg.GetSection(TrajectoryExportOptions.Section));
         services.AddScoped<ITrajectoryExporter, EfTrajectoryExporter>();
+
+        // Phase 14 — DPO / LoRA fine-tuning pipeline.
+        services.Configure<FineTuningOptions>(cfg.GetSection(FineTuningOptions.Section));
+        services.AddScoped<IPreferenceStore, EfPreferenceStore>();
+        services.AddScoped<IDpoExporter, EfDpoExporter>();
+        services.AddHttpClient("finetune");
+        services.AddScoped<IFinetuneJobService, HttpFinetuneJobService>();
 
         // Phase 13 — operational maturity (kanban, clinical context, migration, diagnostics).
         services.Configure<Hope.Agent.Application.Tasks.KanbanOptions>(cfg.GetSection(Hope.Agent.Application.Tasks.KanbanOptions.Section));

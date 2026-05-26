@@ -35,7 +35,7 @@ namespace Hope.Agent.Tools;
 ///
 /// Đầu ra: danh sách assignment { patient_id, slot_id, doctor_id, cost } + tổng min_cost.
 /// </summary>
-public sealed class OptimizeBatchAppointmentsTool : IAgentTool
+public sealed class OptimizeBatchAppointmentsTool(IOptimizationCostHints? costHints = null) : IAgentTool
 {
     public ToolDefinition Definition { get; } = new(
         "optimize_batch_appointments",
@@ -77,7 +77,7 @@ public sealed class OptimizeBatchAppointmentsTool : IAgentTool
         }
         """);
 
-    public Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
+    public async Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
     {
         var args = JsonDocument.Parse(argumentsJson).RootElement;
 
@@ -86,23 +86,35 @@ public sealed class OptimizeBatchAppointmentsTool : IAgentTool
 
         if (requests.Count == 0 || slots.Count == 0)
         {
-            return Task.FromResult(JsonSerializer.Serialize(new
+            return JsonSerializer.Serialize(new
             {
                 assignments = Array.Empty<object>(),
                 total_min_cost = 0,
                 unassigned_patients = requests.Select(r => r.PatientId).ToArray(),
                 algorithm = "min-cost-max-flow",
-            }));
+            });
         }
 
-        var (assignments, totalCost) = SolveMinCostMaxFlow(requests, slots);
+        // Pre-fetch adaptive success rates for all (doctor, specialty) pairs
+        var successRates = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        if (costHints is not null)
+        {
+            foreach (var slot in slots)
+            {
+                var key = $"{slot.DoctorId}:{slot.Specialty}";
+                if (!successRates.ContainsKey(key))
+                    successRates[key] = await costHints.GetSuccessRateAsync(slot.DoctorId, slot.Specialty, ct: ct);
+            }
+        }
+
+        var (assignments, totalCost) = SolveMinCostMaxFlow(requests, slots, successRates);
 
         var assignedIds = assignments.Select(a => a.PatientId).ToHashSet();
         var unassigned = requests.Where(r => !assignedIds.Contains(r.PatientId))
                                  .Select(r => r.PatientId)
                                  .ToArray();
 
-        return Task.FromResult(JsonSerializer.Serialize(new
+        return JsonSerializer.Serialize(new
         {
             assignments = assignments.Select(a => new
             {
@@ -118,7 +130,7 @@ public sealed class OptimizeBatchAppointmentsTool : IAgentTool
             algorithm = "min-cost-max-flow",
             solver = "successive-shortest-paths-spfa",
             optimized_at = DateTimeOffset.UtcNow.ToString("O"),
-        }));
+        });
     }
 
     // ── Domain models ─────────────────────────────────────────────────────────
@@ -195,7 +207,8 @@ public sealed class OptimizeBatchAppointmentsTool : IAgentTool
 
     private static (List<Assignment> Assignments, int TotalCost) SolveMinCostMaxFlow(
         List<PatientRequest> requests,
-        List<SlotInfo> slots)
+        List<SlotInfo> slots,
+        Dictionary<string, double> successRates)
     {
         int p = requests.Count;
         int s = slots.Count;
@@ -228,7 +241,9 @@ public sealed class OptimizeBatchAppointmentsTool : IAgentTool
         {
             for (int j = 0; j < s; j++)
             {
-                int edgeCost = ComputeEdgeCost(requests[i], slots[j]);
+                var rateKey = $"{slots[j].DoctorId}:{slots[j].Specialty}";
+                var rate = successRates.TryGetValue(rateKey, out var r) ? r : 0.85;
+                int edgeCost = ComputeEdgeCost(requests[i], slots[j], rate);
                 AddEdge(i + 1, p + j + 1, 1, edgeCost);
             }
         }
@@ -332,7 +347,7 @@ public sealed class OptimizeBatchAppointmentsTool : IAgentTool
     ///   - Độ chênh giờ hẹn    : +1 cho mỗi 15 phút lệch so với preferred_time
     ///   - Urgency discount     : -20 cho critical, -10 cho high (ưu tiên slot sớm)
     /// </summary>
-    private static int ComputeEdgeCost(PatientRequest req, SlotInfo slot)
+    private static int ComputeEdgeCost(PatientRequest req, SlotInfo slot, double successRate)
     {
         int c = 0;
 
@@ -354,6 +369,11 @@ public sealed class OptimizeBatchAppointmentsTool : IAgentTool
             "high" => 10,
             _ => 0,
         };
+
+        // Adaptive success-rate bonus: doctors with a proven track record get reduced cost.
+        // successRate ∈ [0.5, 1.0] → bonus ∈ [0, 15]  (neutral at 0.5 baseline)
+        int successBonus = (int)Math.Round((successRate - 0.5) * 30.0);
+        c -= Math.Max(0, successBonus);
 
         return Math.Max(0, c); // prevent negative costs
     }
