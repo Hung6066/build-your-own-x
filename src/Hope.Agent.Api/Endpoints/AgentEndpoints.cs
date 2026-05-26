@@ -31,7 +31,7 @@ public static class AgentEndpoints
 
             var result = await runtime.RunAsync(request, ct);
             return Results.Ok(result);
-        });
+        }).RequireRateLimiting("agent-concurrency");
 
         return app;
     }

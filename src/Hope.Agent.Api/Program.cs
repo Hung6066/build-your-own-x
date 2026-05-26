@@ -51,6 +51,7 @@ builder.Services.AddHealthChecks()
     .AddCheck<PostgresHealthCheck>("postgres", tags: ["ready"])
     .AddCheck<RedisHealthCheck>("redis", tags: ["ready"]);
 builder.Services.AddProblemDetails();
+builder.Services.AddMemoryCache();
 
 builder.Services.AddRateLimiter(o =>
 {
@@ -65,8 +66,22 @@ builder.Services.AddRateLimiter(o =>
         {
             PermitLimit = 120,
             Window = TimeSpan.FromMinutes(1),
-            QueueLimit = 0,
+            QueueLimit = 20,
             AutoReplenishment = true,
+        });
+    });
+    // Per-user concurrency limiter for agent endpoints — prevents thread/LLM resource exhaustion
+    // under spike load. Each user may run at most 3 agent calls simultaneously; up to 5 more wait.
+    o.AddPolicy("agent-concurrency", ctx =>
+    {
+        var key = ctx.User.Identity?.IsAuthenticated == true
+            ? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "anon"
+            : ctx.Connection.RemoteIpAddress?.ToString() ?? "anon";
+        return RateLimitPartition.GetConcurrencyLimiter(key, _ => new ConcurrencyLimiterOptions
+        {
+            PermitLimit = 3,
+            QueueLimit = 5,
+            QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
         });
     });
     // MCP endpoint 전용 rate limit (stricter)

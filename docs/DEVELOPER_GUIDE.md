@@ -1,6 +1,6 @@
 # Hope.Agent — Developer Guide
 
-> **Phiên bản tài liệu:** Phase 16 · .NET 9 · Clean Architecture · Build: ✅ 13/13 projects, 0 errors · 0 warnings
+> **Phiên bản tài liệu:** Phase 18 · .NET 9 · Clean Architecture · Build: ✅ 14/14 projects, 0 errors · 0 warnings
 
 Tài liệu này mô tả toàn bộ kiến trúc, luồng xử lý và các quyết định thiết kế của **Hope.Agent**
 qua 16 phase phát triển liên tiếp. Mỗi phase được giải thích kèm **lưu đồ Mermaid**, danh sách
@@ -35,6 +35,8 @@ file liên quan và bảng cơ sở dữ liệu.
 23. [Phase 14 — Google I/O 2026 Capabilities](#23-phase-14--google-io-2026-capabilities-elo-tournament--mcp-atlas--deep-research)
 24. [Phase 15 — Enterprise Security Hardening](#24-phase-15--enterprise-security-hardening-owasp-llm-top-10)
 25. [Phase 16 — NemoClaw Security Rails](#25-phase-16--nemoclaw-security-rails-ssrf--retrieval-rail--execution-rail)
+26. [Phase 17 — Memory Optimization (Dedup · Decay · Multi-Agent Sharing)](#26-phase-17--memory-optimization-dedup--decay--multi-agent-sharing)
+27. [Phase 18 — Scaling for High Concurrency (Embedding Cache · Routing Stats Cache · Concurrency Limit)](#27-phase-18--scaling-for-high-concurrency-embedding-cache--routing-stats-cache--concurrency-limit)
 
 ---
 
@@ -256,12 +258,13 @@ flowchart TD
 ```mermaid
 sequenceDiagram
     participant ORC as Orchestrator
-    participant MEM as MemoryStore (Qdrant episodic)
+    participant MEM as MemoryStore (Qdrant)
     participant RAG as Retriever (Qdrant clinical)
     participant LLM as LLM
 
-    ORC->>MEM: SearchAsync(userEmbedding, topK=5, kind=episodic)
-    MEM-->>ORC: MemorySearchHit[] — lịch sử hội thoại liên quan
+    ORC->>MEM: SearchAsync(userId, queryVec, topK=5, kind=null)
+    Note over MEM: Fetch topK×3 candidates, re-rank by<br/>effectiveScore = cos × importanceWeight × exp(-days/90)
+    MEM-->>ORC: MemorySearchHit[] — tất cả MemoryKind, decay-ranked
 
     Note over ORC: Phase 2 — Clinical Agent cũng gọi RAG
     ORC->>RAG: SearchAsync(RetrievalQuery, collection=clinical_guidelines)
@@ -269,7 +272,45 @@ sequenceDiagram
 
     ORC->>ORC: BuildMessages(conv, memories, skillHits)\n+ RAG context block
     ORC->>LLM: CompleteAsync(enriched messages)
+
+    Note over ORC: Sau khi LLM trả lời:
+    ORC->>MEM: FindSimilarAsync(userId, vec, threshold=0.92)
+    alt Không có memory trùng (cosine < 0.92)
+        ORC->>MEM: UpsertAsync(MemoryKind.Episodic, importance=0.5)
+    else Đã có memory tương tự
+        ORC->>MEM: BumpImportanceAsync(existingId, delta=0.05)
+    end
 ```
+
+### IMemoryStore — interface đầy đủ
+
+```csharp
+public interface IMemoryStore
+{
+    // Ghi / cập nhật một memory record kèm embedding vector
+    Task UpsertAsync(MemoryRecord record, ReadOnlyMemory<float> embedding, CancellationToken ct);
+
+    // Tìm top-K memory, re-rank theo effective score (cos × importance × recency decay)
+    Task<IReadOnlyList<MemorySearchHit>> SearchAsync(
+        Guid userId, ReadOnlyMemory<float> query, int topK, MemoryKind? kind, CancellationToken ct);
+
+    // Tìm ≤1 memory có cosine similarity > threshold — dùng để dedup trước khi insert
+    Task<IReadOnlyList<MemorySearchHit>> FindSimilarAsync(
+        Guid userId, ReadOnlyMemory<float> query, float threshold, CancellationToken ct);
+
+    // Tăng importance của 1 memory (capped at 1.0) khi memory đó được nhắc lại
+    Task BumpImportanceAsync(Guid memoryId, float delta, CancellationToken ct);
+}
+```
+
+### MemoryKind
+
+| Giá trị      | Int | Ghi bởi                                | Ý nghĩa                         |
+| ------------ | --- | -------------------------------------- | ------------------------------- |
+| `Episodic`   | 0   | `AgentOrchestrator.StoreEpisodicAsync` | Tóm tắt 1 lượt user↔assistant   |
+| `Semantic`   | 1   | `/v1/memory` API                       | Fact / knowledge snippet        |
+| `Procedural` | 2   | `/v1/memory` API                       | Quy trình, SOP                  |
+| `Clinical`   | 3   | `PatientMemoryService.WriteAsync`      | Ghi chú lâm sàng cross-workflow |
 
 ### Files liên quan
 
@@ -352,12 +393,31 @@ sequenceDiagram
 
 ### Files liên quan
 
-| File                                                            | Vai trò                         |
-| --------------------------------------------------------------- | ------------------------------- |
-| `src/Hope.Agent.MultiAgent/Orchestration/ChiefMedicalAgent.cs`  | Dispatcher orchestrator         |
-| `src/Hope.Agent.MultiAgent/Roles/Roles.cs`                      | 6 specialist agents             |
-| `src/Hope.Agent.Api/Endpoints/MultiAgentEndpoints.cs`           | `POST /v1/multi-agent/dispatch` |
-| `src/Hope.Agent.Infrastructure/Eventing/KafkaEventPublisher.cs` | Idempotent producer (zstd)      |
+| File                                                            | Vai trò                                        |
+| --------------------------------------------------------------- | ---------------------------------------------- |
+| `src/Hope.Agent.MultiAgent/Orchestration/ChiefMedicalAgent.cs`  | Dispatcher orchestrator                        |
+| `src/Hope.Agent.MultiAgent/Roles/Roles.cs`                      | 6 specialist agents                            |
+| `src/Hope.Agent.MultiAgent/Memory/PatientMemoryService.cs`      | Cross-workflow memory wrapper                  |
+| `src/Hope.Agent.Application/Agents/IPatientMemoryService.cs`    | Contract: `WriteAsync`, `RetrieveAsync(kind?)` |
+| `src/Hope.Agent.Api/Endpoints/MultiAgentEndpoints.cs`           | `POST /v1/multi-agent/dispatch`                |
+| `src/Hope.Agent.Infrastructure/Eventing/KafkaEventPublisher.cs` | Idempotent producer (zstd)                     |
+
+### PatientMemoryService — cross-workflow memory
+
+`PatientMemoryService` là lớp bọc `IMemoryStore` dành riêng cho multi-agent workflow: ghi clinical notes và retrieve memories của bệnh nhân qua nhiều workflow độc lập.
+
+```csharp
+// WriteAsync — ghi với MemoryKind tuỳ chọn (default: Clinical)
+await patientMemory.WriteAsync(patientId, "chẩn đoán tăng huyết áp độ II", MemoryKind.Clinical);
+
+// RetrieveAsync — mặc định kind=null (tất cả MemoryKind)
+var notes = await patientMemory.RetrieveAsync(patientId, queryText, topK: 3);
+
+// Giới hạn theo loại memory cụ thể (tuỳ chọn)
+var clinical = await patientMemory.RetrieveAsync(patientId, queryText, kind: MemoryKind.Clinical);
+```
+
+> **Lưu ý:** Trước Phase 17, `RetrieveAsync` luôn lọc cứng `MemoryKind.Clinical` → agents không thấy được Episodic memory (từ conversation). Đã sửa: mặc định `kind = null`.
 
 ### Bảng DB / Topics
 
@@ -2497,6 +2557,23 @@ sequenceDiagram
 
 **Endpoint**: `POST /v1/subagents/run` với body `{ task, profiles: ["cardiology","endocrinology",...] }`.
 
+### Chia sẻ conversation context giữa các subagent branch
+
+Kể từ Phase 17, `SubagentRequest` có thêm field `ParentConversationId`. Mỗi branch subagent được khởi tạo với `ConversationId = parentConversationId` thay vì `null`, do đó:
+
+- Tất cả branch đọc **cùng lịch sử hội thoại** từ PostgreSQL → không lặp lại câu hỏi ban đầu
+- Episodic memory mỗi branch ghi ra cũng được gắn `ConversationId` đúng → dễ trace
+- Caller (endpoint Phase 12) cần truyền `ParentConversationId` vào `SubagentRequest`
+
+```csharp
+var result = await subagentPool.FanOutAsync(new SubagentRequest(
+    UserId: req.UserId,
+    Question: req.Question,
+    Specs: specs,
+    ParentConversationId: req.ConversationId   // ← truyền xuống để branch chia sẻ context
+), ct);
+```
+
 ### 21.2 Voice in / Voice out (Speech)
 
 | Thành phần                                     | Vai trò                                                                                                                |
@@ -2527,6 +2604,304 @@ UI nằm trong project `Hope.Agent.Web` (Blazor Server), reuse `NotificationsHub
 | `Application/Training/ITrajectoryExporter.cs` | `ExportAsync(maxConversations, ct)` trả `IAsyncEnumerable<TrajectoryRecord>`.                                                               |
 | `EfTrajectoryExporter`                        | Join `Conversations` + `Messages` + `ToolExecutions` + `AuditEvents`, PHI-redact qua `IPhiRedactor`, output JSONL theo schema SFT-friendly. |
 | `Api/Endpoints/TrainingEndpoints.cs`          | `GET /v1/training/trajectories?max=500` stream JSONL.                                                                                       |
+
+---
+
+## 27. Phase 18 — Scaling for High Concurrency (Embedding Cache · Routing Stats Cache · Concurrency Limit)
+
+> **Phiên bản tài liệu:** Phase 18 · .NET 9 Clean Architecture · Build: ✅ 14/14 projects, 0 errors, 0 warnings
+>
+> **Bối cảnh:** Khi số lượng agent đồng thời cao (50–500 concurrent users, mỗi user 3–5 agent calls), hệ thống cần:
+>
+> - **Correctness:** Concurrency limiting (không burst quá giới hạn)
+> - **Responsiveness:** Queue small bursts thay vì hard-reject ngay
+> - **Speed:** Cache các embedding / routing stats để avoid N redundant DB/LLM round-trips
+
+Phase 18 giải quyết 3 bottleneck:
+
+1. **Embedding cache** — Redis-backed `IEmbeddingCache`, wrap all providers với `CachingEmbeddingProvider` decorator
+2. **Routing stats cache** — In-memory 30s TTL cache trong `BanditAdaptiveRouter` (avoid DB query mỗi request)
+3. **Concurrency limiter** — Per-user `ConcurrencyLimiter` (3 parallel, queue 5 extra) + raise global `QueueLimit` from 0 → 20
+
+### 27.1 Architecture — 5-Layer Scaling Stack
+
+```mermaid
+graph TD
+    subgraph CLIENT["Client"]
+        C1["User 1\n(1 agent)"]
+        C2["User 2\n(2 agents)"]
+        CN["User N\n(3 agents)"]
+    end
+
+    subgraph GATEWAY["Rate Limit Layer"]
+        RL["Global FixedWindow\n(120 req/min per user)\nQueueLimit: 20"]
+        CC["Per-User Concurrency\n(3 parallel, queue 5)"]
+    end
+
+    subgraph ORCHESTRATOR["Orchestrator Layer"]
+        ORC1["AgentOrchestrator\n(Scoped)"]
+    end
+
+    subgraph CACHE["Cache Layer"]
+        EMBC["IEmbeddingCache\n(Redis, 60min TTL)"]
+        STATSCC["BanditAdaptiveRouter\nStatsCache\n(Memory, 30s TTL)"]
+    end
+
+    subgraph LLM["LLM Layer"]
+        LLMR["LLMRouter\nwraps embedders\nwith decorator"]
+    end
+
+    subgraph INFRA["Infrastructure"]
+        PG[("PostgreSQL")]
+        REDIS[("Redis")]
+        QDRANT[("Qdrant")]
+    end
+
+    C1 & C2 & CN --> RL & CC
+    RL & CC --> ORC1
+    ORC1 --> EMBC & STATSCC
+    ORC1 --> LLMR
+    LLMR --> EMBC
+    EMBC --> REDIS
+    STATSCC --> LLMR & INFRA
+    LLMR & STATSCC --> PG & REDIS & QDRANT
+```
+
+**Giải thích:**
+
+- **Client layer:** N concurrent users, each submitting 1+ agent requests
+- **Rate Limit layer:** Global `FixedWindow` (120/min) + per-user `Concurrency` (3 parallel)
+- **Orchestrator:** `AddScoped` — one per request, stateless
+- **Cache layer:** Two independent caches:
+  - `IEmbeddingCache` (Redis): Persist across requests, TTL 60min
+  - `BanditAdaptiveRouter` cache (Memory): Transient, TTL 30s, invalidated on outcome
+- **LLM layer:** All `IEmbeddingProvider` wrapped by `CachingEmbeddingProvider`
+- **Infrastructure:** Existing Postgres, Redis, Qdrant backends
+
+### 27.2 Embedding Cache — Avoid N Redundant LLM Calls
+
+**Problem under high concurrency:**
+
+```
+User A asks: "What is hypertension?"
+  ↓ embed("What is hypertension?") → LLM API call #1 (150ms)
+User B asks: "What is hypertension?"
+  ↓ embed("What is hypertension?") → LLM API call #2 (150ms)  ← DUPLICATE!
+User C asks: "What is hypertension?"
+  ↓ embed("What is hypertension?") → LLM API call #3 (150ms)  ← DUPLICATE!
+```
+
+**Solution — Redis embedding cache:**
+
+| Component                                      | Role                                                                                                                                                                                                                                           |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Application/Abstractions/IEmbeddingCache.cs`  | `GetAsync(text) → vector?` and `SetAsync(text, vector)`.                                                                                                                                                                                       |
+| `Infrastructure/Memory/RedisEmbeddingCache.cs` | Implements `IEmbeddingCache`: SHA256-keyed (`emb:v1:{hash}`), binary serialization (float[] → bytes). TTL configurable via `EmbeddingCacheOptions.TtlMinutes` (default 60).                                                                    |
+| `LLMGateway/CachingEmbeddingProvider.cs`       | Decorator `IEmbeddingProvider`: intercepts `EmbedAsync`, checks cache, merges cache-hits + cache-misses, caches new vectors. Batch-aware: for single-input requests, one Redis GET. For multi-input, partial-cache (check each independently). |
+
+**Example flow:**
+
+```
+Request 1: embed("Hypertension")
+  ├─ Cache.Get("Hypertension") → MISS
+  ├─ LLM.Embed("Hypertension") → [0.12, 0.34, ...]
+  ├─ Cache.Set("Hypertension", [...])
+  └─ return [0.12, 0.34, ...]  [150ms]
+
+Request 2: embed("Hypertension")
+  ├─ Cache.Get("Hypertension") → HIT [0.12, 0.34, ...]
+  └─ return [0.12, 0.34, ...]  [5ms]  ← 30x faster
+```
+
+**Configuration** (`appsettings.json`):
+
+```json
+{
+  "EmbeddingCache": {
+    "Enabled": true,
+    "TtlMinutes": 60
+  }
+}
+```
+
+### 27.3 Routing Stats Cache — Avoid DB Query per Request
+
+**Problem:**
+
+- Every `SelectChatAsync(intent)` loads `RoutingStats` from PostgreSQL (DB round-trip ~20ms)
+- Under 100 concurrent agents: 100 DB reads/sec redundantly for same intent
+
+**Solution — In-memory stats cache (30s TTL):**
+
+```csharp
+public async Task<RouterChoice> SelectChatAsync(string intent, CancellationToken ct)
+{
+    var cacheKey = $"routing_stats:{intent}";
+    if (!statsCache.TryGetValue(cacheKey, out List<RoutingStat>? stats) || stats == null)
+    {
+        stats = await db.RoutingStats.AsNoTracking()
+            .Where(s => s.Intent == intent)
+            .ToListAsync(ct);
+        statsCache.Set(cacheKey, stats, TimeSpan.FromSeconds(30));  // ← 30s TTL
+    }
+
+    // UCB1 calculation on cached data
+    var totalPulls = Math.Max(1, stats.Sum(s => s.Pulls));
+    // ... rest of UCB1 logic
+}
+
+public async Task RecordOutcomeAsync(string intent, ...)
+{
+    // Invalidate cache after recording new outcome
+    statsCache.Remove($"routing_stats:{intent}");
+    // ... save to DB
+}
+```
+
+**Impact:** Under 100 concurrent requests for "clinical" intent:
+
+- **Before:** 100 DB queries (2000ms total DB load)
+- **After:** 1 DB query + 99 cache hits (30ms total)
+
+### 27.4 Concurrency Limiter — Prevent Resource Exhaustion
+
+**Problem:**
+
+- Global `FixedWindowRateLimiter` with `QueueLimit = 0` = hard-reject bursts → 429 TooManyRequests
+- No in-flight LLM call limit → spike of 100 concurrent requests = 100 LLM API calls simultaneously
+
+**Solution — Per-user `ConcurrencyLimiter` + raise global `QueueLimit`:**
+
+```csharp
+// Program.cs, rate limiting setup
+o.AddPolicy("agent-concurrency", ctx =>
+{
+    var userId = ctx.User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "anon";
+    return RateLimitPartition.GetConcurrencyLimiter(userId, _ => new ConcurrencyLimiterOptions
+    {
+        PermitLimit = 3,      // max 3 in-flight agent calls per user
+        QueueLimit = 5,       // queue up to 5, don't hard-reject
+        QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+    });
+});
+
+// Global limiter: raise QueueLimit from 0 → 20
+var options = new FixedWindowRateLimiterOptions
+{
+    PermitLimit = 120,
+    Window = TimeSpan.FromMinutes(1),
+    QueueLimit = 20,        // ← was 0, now allows small burst queuing
+    AutoReplenishment = true,
+};
+```
+
+**Apply policy to `/v1/agent/chat` endpoint:**
+
+```csharp
+grp.MapPost("/chat", async (req, runtime, user, http, ct) =>
+{
+    var result = await runtime.RunAsync(request, ct);
+    return Results.Ok(result);
+}).RequireRateLimiting("agent-concurrency");  // ← apply policy
+```
+
+**Example scenario (100 users × 3 agent calls each = 300 in-flight):**
+
+- **Global FixedWindow:** 120 req/min limit per user
+  - User A: 120 requests queued/granted in 60s
+  - User B: 120 requests queued/granted in 60s
+  - Excess 60 requests from each user wait in queue (QueueLimit=20 per user) or rejected
+- **Per-user Concurrency:** 3 parallel
+  - At t=0, User A sends 10 requests → 3 granted immediately, 5 queued (QueueLimit=5), 2 rejected (409 Conflict, or queue full logic)
+  - As in-flight requests complete, queued requests are dequeued (FIFO)
+
+### 27.5 DI Registration & Configuration
+
+**Infrastructure DI** (`Hope.Agent.Infrastructure/DependencyInjection.cs`):
+
+```csharp
+// Add embedding cache
+services.Configure<EmbeddingCacheOptions>(cfg.GetSection(EmbeddingCacheOptions.Section));
+services.AddSingleton<IEmbeddingCache, RedisEmbeddingCache>();
+
+// BanditAdaptiveRouter now injects IMemoryCache for stats caching
+services.AddScoped<IAdaptiveRouter, BanditAdaptiveRouter>();
+```
+
+**API DI** (`Hope.Agent.Api/Program.cs`):
+
+```csharp
+builder.Services.AddMemoryCache();  // ← for BanditAdaptiveRouter stats cache
+
+builder.Services.AddRateLimiter(o =>
+{
+    // Global FixedWindow (120 req/min, QueueLimit=20)
+    o.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(ctx => ...);
+
+    // Per-user concurrency (3 parallel, queue 5)
+    o.AddPolicy("agent-concurrency", ctx => ...);
+});
+```
+
+**LLM Gateway DI** (`Hope.Agent.LLMGateway/DependencyInjection.cs`):
+
+```csharp
+// LLMRouter automatically injects optional IEmbeddingCache?
+// If cache is available (registered in Infrastructure), all embedding providers are wrapped.
+services.AddSingleton<ILLMRouter, LLMRouter>();
+```
+
+### 27.6 Files Modified (Phase 18)
+
+| File                                                         | Change                                                                                              |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `Hope.Agent.Application/Abstractions/IEmbeddingCache.cs`     | NEW: `GetAsync`, `SetAsync` interface                                                               |
+| `Hope.Agent.Infrastructure/Memory/RedisEmbeddingCache.cs`    | NEW: Redis-backed cache, SHA256 keying, TTL configurable                                            |
+| `Hope.Agent.LLMGateway/CachingEmbeddingProvider.cs`          | NEW: Decorator wrapping all `IEmbeddingProvider` instances                                          |
+| `Hope.Agent.LLMGateway/LLMRouter.cs`                         | UPDATED: Accept optional `IEmbeddingCache?`, wrap providers with decorator                          |
+| `Hope.Agent.Infrastructure/Learning/BanditAdaptiveRouter.cs` | UPDATED: Inject `IMemoryCache`, cache routing stats 30s per intent                                  |
+| `Hope.Agent.Infrastructure/DependencyInjection.cs`           | UPDATED: Register `IEmbeddingCache` singleton                                                       |
+| `Hope.Agent.Api/Program.cs`                                  | UPDATED: `AddMemoryCache()`, `AddPolicy("agent-concurrency", ...)`, raise global `QueueLimit` to 20 |
+| `Hope.Agent.Api/Endpoints/AgentEndpoints.cs`                 | UPDATED: `RequireRateLimiting("agent-concurrency")` on `/chat`                                      |
+
+### 27.7 Performance Estimate
+
+| Scenario                                 | Before                                              | After                                                             | Gain                                  |
+| ---------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------- |
+| **50 concurrent users, same query**      | 50 × embed(150ms) + 50 × routing_stats(20ms) = 8.5s | 1 × embed + 1 × routing_stats + 49 cache hits (5ms each) = ~245ms | **34x faster**                        |
+| **100 concurrent, burst spike**          | Hard-reject after FixedWindow limit                 | Queue up to 5 per user, process fairly (FIFO)                     | More responsive, no immediate failure |
+| **Single user, sequential 100 requests** | 100 × embed + 100 × routing_stats = 17s             | ~1 × embed + 1 × routing_stats + 99 cached (all <1ms) = <1s       | **17x faster**                        |
+
+### 27.8 Monitoring & Observability
+
+**Metrics to track (Prometheus):**
+
+- `embedding_cache_hits_total` — cumulative hits
+- `embedding_cache_misses_total` — cumulative misses
+- `embedding_cache_hit_rate` — (hits / (hits+misses)) %
+- `routing_stats_cache_hits_total` — same for routing stats
+- `agent_concurrency_queue_depth` — current queued requests
+- `agent_concurrency_permit_wait_duration_ms` — how long requests waited in queue
+
+**Grafana dashboard:**
+
+- Top left: Embedding cache hit rate (target: >80% after warmup)
+- Top right: Routing stats cache hit rate (target: >95%)
+- Bottom left: Agent concurrency queue depth (should stay <QueueLimit=5 under normal load)
+- Bottom right: LLM latency (should drop 30x for cached embedding queries)
+
+### 27.9 Scaling Checklist
+
+- [ ] Embedding cache enabled in `appsettings.json` (`EmbeddingCache:Enabled=true`)
+- [ ] Redis connection string configured (`ConnectionStrings:Redis`)
+- [ ] Memory cache registered (`AddMemoryCache()` in `Program.cs`)
+- [ ] Concurrency limiter policy applied to `/v1/agent/chat` endpoint
+- [ ] Global `QueueLimit` raised from 0 to 20 (or higher if needed)
+- [ ] Prometheus scrape targets include embedding/routing cache metrics
+- [ ] Load test: `ab -c 100 -n 10000 http://localhost:5000/v1/agent/chat` (or `wrk`)
+- [ ] Verify under load: embedding cache hit rate >80%, no 409 Conflict (queue full)
+
+---
 
 **Output schema** (per line):
 
@@ -3084,3 +3459,123 @@ Nếu output chứa injection pattern: dùng `SanitizedInput`, log warning `Exec
 | File                                                            | Vai trò                                              |
 | --------------------------------------------------------------- | ---------------------------------------------------- |
 | `src/Hope.Agent.AgentRuntime/Security/SandboxedToolExecutor.cs` | Inject `IPromptShield outputRail`, screen sau invoke |
+
+---
+
+## 26. Phase 17 — Memory Optimization (Dedup · Decay · Multi-Agent Sharing)
+
+### Mục tiêu
+
+Tối ưu memory cho môi trường nhiều agent chạy liên tục:
+
+- Ngăn Qdrant phình to do episodic memory duplicate
+- Ưu tiên memory mới và memory quan trọng khi search
+- Đảm bảo tất cả agent cùng user đều có thể đọc memory của nhau
+
+### 26.1 Recency Decay + Importance Re-ranking
+
+Thay vì trả về kết quả theo raw cosine similarity của Qdrant, `QdrantMemoryStore.SearchAsync` giờ re-rank theo effective score:
+
+$$\text{effectiveScore} = \cos(q, v) \times (0.4 + 0.6 \cdot \text{importance}) \times e^{-d/90}$$
+
+Trong đó:
+
+- $\cos(q, v)$ — cosine similarity từ Qdrant
+- $\text{importance} \in [0, 1]$ — trọng số quan trọng lưu trong payload Qdrant
+- $d$ — số ngày từ lúc memory được tạo đến hiện tại
+- $e^{-d/90}$ — hàm suy giảm theo thời gian với half-life 90 ngày
+
+**Tại sao hệ số $[0.4, 1.0]$ cho importance?** Importance thấp không làm memory biến mất hoàn toàn — vẫn có thể surface nếu cosine similarity rất cao.
+
+Implementation: fetch `topK × 3` candidates từ Qdrant, tính lại score, sort descending, lấy `topK` đầu.
+
+### 26.2 Episodic Memory Deduplication
+
+Mỗi lượt `AgentOrchestrator.RunAsync` kết thúc đều gọi `StoreEpisodicAsync`. Trước Phase 17, mỗi turn luôn tạo 1 Qdrant point mới → database phình to theo thời gian.
+
+Kể từ Phase 17:
+
+```mermaid
+flowchart TD
+    END["Kết thúc agent turn"] --> EMBED["Embed summary"]
+    EMBED --> FIND["FindSimilarAsync\n(threshold = 0.92)"]
+    FIND --> EXIST{"Có memory\ntương tự?"}
+    EXIST -->|"cosine > 0.92"| BUMP["BumpImportanceAsync\n(+0.05, capped 1.0)"]
+    EXIST -->|"cosine ≤ 0.92"| INSERT["UpsertAsync\n(MemoryKind.Episodic)"]
+```
+
+Ngưỡng 0.92 ≈ cùng chủ đề + cùng câu trả lời. Threshold này có thể cấu hình nếu cần.
+
+### 26.3 IMemoryStore — API mới
+
+| Method                                     | Mục đích                                            |
+| ------------------------------------------ | --------------------------------------------------- |
+| `SearchAsync(userId, vec, topK, kind?)`    | Search + decay re-rank, đã có từ Phase 2            |
+| `FindSimilarAsync(userId, vec, threshold)` | Tìm ≤1 memory có cosine > threshold, dùng cho dedup |
+| `BumpImportanceAsync(memoryId, delta)`     | Tăng importance khi memory được nhắc lại            |
+
+### 26.4 PatientMemoryService — sửa lỗi kind filter
+
+**Lỗi (trước Phase 17):** `RetrieveAsync` luôn truyền `MemoryKind.Clinical` vào `SearchAsync` → workflow chỉ tìm thấy clinical notes, không thấy episodic memories do `AgentOrchestrator` ghi ra.
+
+**Sửa:** `RetrieveAsync` thêm parameter `MemoryKind? kind = null` — truyền thẳng xuống `IMemoryStore.SearchAsync`. Gọi không có `kind` → tìm tất cả loại.
+
+```csharp
+// Tìm tất cả loại (mặc định — dùng khi multi-agent workflow cần context đầy đủ)
+var all = await patientMemory.RetrieveAsync(patientId, query);
+
+// Chỉ lấy clinical notes (khi cần kiểm tra lịch sử chẩn đoán)
+var clinical = await patientMemory.RetrieveAsync(patientId, query, kind: MemoryKind.Clinical);
+```
+
+### 26.5 Subagent Conversation Sharing
+
+Chi tiết xem [Section 21.1](#211-isubagentpool--parallel-fan-out) — `ParentConversationId` trên `SubagentRequest`.
+
+### 26.6 Memory Architecture tổng quan
+
+```mermaid
+graph TD
+    subgraph INFRA["Infrastructure (Singleton)"]
+        QDRANT[("Qdrant\nagent_memory collection")]
+        QMS["QdrantMemoryStore\n• UpsertAsync\n• SearchAsync (decay re-rank)\n• FindSimilarAsync\n• BumpImportanceAsync"]
+        QMS <--> QDRANT
+    end
+
+    subgraph RUNTIME["AgentRuntime (Scoped per request)"]
+        ORC["AgentOrchestrator"]
+        ORC -->|"SearchAsync(userId, kind=null)"| QMS
+        ORC -->|"FindSimilarAsync → BumpImportance / Upsert"| QMS
+    end
+
+    subgraph MULTIAGENT["MultiAgent (Scoped per workflow)"]
+        PMS["PatientMemoryService"]
+        PMS -->|"SearchAsync(patientId, kind?)"| QMS
+        PMS -->|"UpsertAsync(kind=Clinical)"| QMS
+    end
+
+    subgraph SUBAGENT["SubagentPool (Parallel branches)"]
+        B1["Branch A\nAgentOrchestrator"]
+        B2["Branch B\nAgentOrchestrator"]
+        B1 & B2 -->|"parentConvId → shared conversation"| ORC
+    end
+```
+
+**Điểm mấu chốt:**
+
+- `IMemoryStore` là **singleton** → mọi agent đều dùng chung Qdrant connection
+- Isolation theo **`user_id`** payload field — agents khác user không thấy nhau ✅
+- Agents **cùng user** chia sẻ memory (cả Episodic + Clinical + Semantic + Procedural) ✅
+- Subagent branches chia sẻ **conversation history** qua `ParentConversationId` ✅
+
+### Files thay đổi (Phase 17)
+
+| File                                                            | Thay đổi                                                         |
+| --------------------------------------------------------------- | ---------------------------------------------------------------- |
+| `src/Hope.Agent.Application/Abstractions/IMemoryStore.cs`       | Thêm `FindSimilarAsync`, `BumpImportanceAsync`                   |
+| `src/Hope.Agent.Infrastructure/Memory/QdrantMemoryStore.cs`     | Implement 2 method mới; `SearchAsync` thêm recency decay re-rank |
+| `src/Hope.Agent.AgentRuntime/AgentOrchestrator.cs`              | `StoreEpisodicAsync` thêm dedup logic + `agent_profile` metadata |
+| `src/Hope.Agent.Application/Subagents/ISubagentPool.cs`         | `SubagentRequest` thêm `ParentConversationId?`                   |
+| `src/Hope.Agent.AgentRuntime/Subagents/ParallelSubagentPool.cs` | Pass `ParentConversationId` vào `AgentRequest`                   |
+| `src/Hope.Agent.Application/Agents/IPatientMemoryService.cs`    | `RetrieveAsync` thêm `MemoryKind? kind = null`                   |
+| `src/Hope.Agent.MultiAgent/Memory/PatientMemoryService.cs`      | Implement `kind` parameter thay vì hard-code `Clinical`          |

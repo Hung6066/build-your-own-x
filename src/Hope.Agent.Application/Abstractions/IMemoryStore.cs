@@ -6,6 +6,11 @@ public interface IMemoryStore
 {
     Task UpsertAsync(MemoryRecord record, ReadOnlyMemory<float> embedding, CancellationToken ct);
     Task<IReadOnlyList<MemorySearchHit>> SearchAsync(Guid userId, ReadOnlyMemory<float> query, int topK, MemoryKind? kind, CancellationToken ct);
+    /// <summary>Returns up to 1 memory whose raw cosine similarity exceeds <paramref name="threshold"/>.
+    /// Used for deduplication before inserting a new episodic record.</summary>
+    Task<IReadOnlyList<MemorySearchHit>> FindSimilarAsync(Guid userId, ReadOnlyMemory<float> query, float threshold, CancellationToken ct);
+    /// <summary>Increases the stored importance of an existing memory by <paramref name="delta"/>, capped at 1.0.</summary>
+    Task BumpImportanceAsync(Guid memoryId, float delta, CancellationToken ct);
 }
 
 public sealed record MemorySearchHit(MemoryRecord Record, float Score);

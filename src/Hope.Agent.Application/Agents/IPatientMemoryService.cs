@@ -24,10 +24,12 @@ public interface IPatientMemoryService
     /// <summary>
     /// Retrieves the most semantically relevant memory contents for a patient given a query.
     /// Returns content strings ordered by similarity descending, or an empty list on failure.
+    /// Pass <paramref name="kind"/> to restrict to a specific memory kind, or <c>null</c> to search all kinds.
     /// </summary>
     Task<IReadOnlyList<string>> RetrieveAsync(
         Guid patientId,
         string query,
         int topK = 3,
+        MemoryKind? kind = null,
         CancellationToken ct = default);
 }

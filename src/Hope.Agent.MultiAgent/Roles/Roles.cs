@@ -75,7 +75,7 @@ internal sealed class ClinicalAgent(
         var memoryContext = string.Empty;
         if (patientMemory is not null && task.UserId != Guid.Empty)
         {
-            var memories = await patientMemory.RetrieveAsync(task.UserId, task.Input, topK: 3, ct);
+            var memories = await patientMemory.RetrieveAsync(task.UserId, task.Input, topK: 3, ct: ct);
             if (memories.Count > 0)
                 memoryContext = "Previous patient history:\n" + string.Join("\n", memories.Select((m, i) => $"{i + 1}. {m}")) + "\n\n";
         }

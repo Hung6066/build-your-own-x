@@ -3,6 +3,7 @@ using Hope.Agent.Application.Learning;
 using Hope.Agent.Domain.Learning;
 using Hope.Agent.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
 
 namespace Hope.Agent.Infrastructure.Learning;
@@ -15,9 +16,11 @@ internal sealed class BanditAdaptiveRouter(
     ILLMRouter fallback,
     IEnumerable<IChatCompletionProvider> providers,
     AgentDbContext db,
+    IMemoryCache statsCache,
     ILogger<BanditAdaptiveRouter> log) : IAdaptiveRouter
 {
     private const double ExplorationC = 1.4;
+    private const int StatsCacheTtlSeconds = 30;
     private readonly IReadOnlyList<IChatCompletionProvider> _arms = providers.ToList();
 
     public async Task<RouterChoice> SelectChatAsync(string intent, CancellationToken ct)
@@ -28,9 +31,14 @@ internal sealed class BanditAdaptiveRouter(
             return new RouterChoice(only.Name, only.Name);
         }
 
-        var stats = await db.RoutingStats.AsNoTracking()
-            .Where(s => s.Intent == intent)
-            .ToListAsync(ct);
+        var cacheKey = $"routing_stats:{intent}";
+        if (!statsCache.TryGetValue(cacheKey, out List<RoutingStat>? stats) || stats == null)
+        {
+            stats = await db.RoutingStats.AsNoTracking()
+                .Where(s => s.Intent == intent)
+                .ToListAsync(ct);
+            statsCache.Set(cacheKey, stats, TimeSpan.FromSeconds(StatsCacheTtlSeconds));
+        }
 
         var totalPulls = Math.Max(1, stats.Sum(s => s.Pulls));
         IChatCompletionProvider best = _arms[0];
@@ -57,6 +65,9 @@ internal sealed class BanditAdaptiveRouter(
 
     public async Task RecordOutcomeAsync(string intent, string provider, string model, double reward, double latencyMs, bool failed, CancellationToken ct)
     {
+        // Invalidate the stats cache so SelectChatAsync re-reads fresh data after this write.
+        statsCache.Remove($"routing_stats:{intent}");
+
         var stat = await db.RoutingStats.FirstOrDefaultAsync(
             s => s.Intent == intent && s.Provider == provider && s.Model == model, ct);
 

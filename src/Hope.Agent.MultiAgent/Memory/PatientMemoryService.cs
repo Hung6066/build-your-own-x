@@ -47,12 +47,13 @@ internal sealed class PatientMemoryService(
         Guid patientId,
         string query,
         int topK = 3,
+        MemoryKind? kind = null,
         CancellationToken ct = default)
     {
         try
         {
             var embResp = await embeddings.EmbedAsync(new EmbeddingRequest([query]), ct);
-            var hits = await memoryStore.SearchAsync(patientId, embResp.Vectors[0], topK, MemoryKind.Clinical, ct);
+            var hits = await memoryStore.SearchAsync(patientId, embResp.Vectors[0], topK, kind, ct);
             return hits.Select(h => h.Record.Content).ToList();
         }
         catch (Exception ex)

@@ -1,11 +1,23 @@
+using Hope.Agent.Application.Abstractions;
 using Hope.Agent.Application.LLM;
 
 namespace Hope.Agent.LLMGateway;
 
-internal sealed class LLMRouter(IEnumerable<IChatCompletionProvider> chat, IEnumerable<IEmbeddingProvider> embed, LLMOptions options) : ILLMRouter
+internal sealed class LLMRouter(
+    IEnumerable<IChatCompletionProvider> chat,
+    IEnumerable<IEmbeddingProvider> embed,
+    LLMOptions options,
+    IEmbeddingCache? cache = null) : ILLMRouter
 {
-    private readonly Dictionary<string, IChatCompletionProvider> _chat = chat.ToDictionary(p => p.Name, StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, IEmbeddingProvider> _embed = embed.ToDictionary(p => p.Name, StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, IChatCompletionProvider> _chat =
+        chat.ToDictionary(p => p.Name, StringComparer.OrdinalIgnoreCase);
+
+    // Wrap each embedding provider with the caching decorator when Redis cache is available.
+    private readonly Dictionary<string, IEmbeddingProvider> _embed =
+        embed.ToDictionary(
+            p => p.Name,
+            p => cache is not null ? (IEmbeddingProvider)new CachingEmbeddingProvider(p, cache) : p,
+            StringComparer.OrdinalIgnoreCase);
 
     public IChatCompletionProvider SelectChat(string? hint = null)
     {

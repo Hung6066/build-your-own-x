@@ -86,7 +86,7 @@ internal sealed class ParallelSubagentPool(
                 ? request.Question
                 : $"[Specialist hint: {spec.SystemPromptHint}]\n\n{request.Question}";
             var resp = await runtime.RunAsync(
-                new AgentRequest(request.UserId, null, message, spec.Profile, request.CorrelationId),
+                new AgentRequest(request.UserId, request.ParentConversationId, message, spec.Profile, request.CorrelationId),
                 cts.Token);
             return new SubagentBranchResult(spec.Profile, resp.Reply, resp.PromptTokens, resp.CompletionTokens, sw.Elapsed);
         }

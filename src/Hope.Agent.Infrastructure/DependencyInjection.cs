@@ -52,6 +52,10 @@ public static class DependencyInjection
         services.AddSingleton<IConnectionMultiplexer>(_ =>
             ConnectionMultiplexer.Connect(cfg.GetConnectionString("Redis") ?? "localhost:6379"));
 
+        // Embedding vector cache — Redis-backed, avoids re-embedding identical text under load.
+        services.Configure<EmbeddingCacheOptions>(cfg.GetSection(EmbeddingCacheOptions.Section));
+        services.AddSingleton<IEmbeddingCache, RedisEmbeddingCache>();
+
         var qdrant = cfg.GetSection("Qdrant").Get<QdrantOptions>() ?? new QdrantOptions();
         services.AddSingleton(qdrant);
         services.AddSingleton(_ => new QdrantClient(qdrant.Host, qdrant.Port, apiKey: qdrant.ApiKey));

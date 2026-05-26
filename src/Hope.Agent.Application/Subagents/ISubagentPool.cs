@@ -6,7 +6,8 @@ public sealed record SubagentRequest(
     Guid UserId,
     string Question,
     IReadOnlyList<SubagentSpec> Specs,
-    string? CorrelationId = null);
+    string? CorrelationId = null,
+    Guid? ParentConversationId = null);
 
 public sealed record SubagentBranchResult(
     string Profile,

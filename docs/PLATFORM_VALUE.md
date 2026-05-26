@@ -454,6 +454,11 @@ Vì core architecture dựa trên abstractions, không hardcode y tế:
 
 **Effort ước tính để port sang ngành mới:** 2–4 tuần (context files + MCP adapters).
 
+> **Case study cụ thể — Logistics:** Xem [LOGISTICS_PLATFORM_REUSE.md](LOGISTICS_PLATFORM_REUSE.md)
+> để thấy chi tiết bản đồ tái sử dụng 85% codebase, 6 tool stub đã sẵn sàng
+> ([`LogisticsTools.cs`](../src/Hope.Agent.Tools/LogisticsTools.cs)), MCP adapters cần xây,
+> hội thoại mẫu và lộ trình triển khai 4 tuần.
+
 ---
 
 ## 8. Tự học liên tục — hệ thống ngày càng tốt hơn

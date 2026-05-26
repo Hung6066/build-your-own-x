@@ -441,6 +441,19 @@ internal sealed class AgentOrchestrator(
             var summary = $"User asked: {request.Message}\nAssistant replied: {finalContent}";
             var embedder = router.SelectEmbedding();
             var vec = (await embedder.EmbedAsync(new EmbeddingRequest([summary]), ct)).Vectors[0];
+
+            // Dedup: if a nearly identical memory already exists, just boost its importance
+            // rather than inserting a duplicate. Threshold 0.92 ≈ same topic + same answer.
+            var similar = await memory.FindSimilarAsync(request.UserId, vec, 0.92f, ct);
+            if (similar.Count > 0)
+            {
+                await memory.BumpImportanceAsync(similar[0].Record.Id, 0.05f, ct);
+                return;
+            }
+
+            var metadata = string.IsNullOrWhiteSpace(request.AgentProfile)
+                ? new Dictionary<string, string>()
+                : new Dictionary<string, string> { ["agent_profile"] = request.AgentProfile };
             await memory.UpsertAsync(new MemoryRecord
             {
                 Id = Guid.CreateVersion7(),
@@ -450,6 +463,7 @@ internal sealed class AgentOrchestrator(
                 Content = summary,
                 Source = "agent_runtime",
                 Importance = 0.5f,
+                Metadata = metadata,
                 CreatedAt = clock.UtcNow,
             }, vec, ct);
         }
