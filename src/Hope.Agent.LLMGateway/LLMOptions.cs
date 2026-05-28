@@ -18,6 +18,10 @@ public sealed class OpenAICompatibleOptions
     public string Model { get; set; } = "gpt-4o-mini";
     public string EmbeddingModel { get; set; } = "text-embedding-3-small";
     public int TimeoutSeconds { get; set; } = 60;
+    /// <summary>USD per 1,000 prompt tokens. Used to populate <see cref="Hope.Agent.Application.LLM.ChatUsage.CostUsd"/>.</summary>
+    public decimal CostPer1KInputTokens { get; set; }
+    /// <summary>USD per 1,000 completion tokens.</summary>
+    public decimal CostPer1KOutputTokens { get; set; }
 }
 
 public sealed class AnthropicOptions
@@ -26,6 +30,8 @@ public sealed class AnthropicOptions
     public string ApiKey { get; set; } = string.Empty;
     public string Model { get; set; } = "claude-3-5-sonnet-latest";
     public string Version { get; set; } = "2023-06-01";
+    public decimal CostPer1KInputTokens { get; set; }
+    public decimal CostPer1KOutputTokens { get; set; }
 }
 
 public sealed class GeminiOptions
@@ -39,4 +45,6 @@ public sealed class GeminiOptions
     /// extended thinking + grounding. Switch to "gemini-2.5-pro" for Deep Research Max quality.
     /// </summary>
     public string DeepResearchModel { get; set; } = "gemini-2.5-flash";
+    public decimal CostPer1KInputTokens { get; set; }
+    public decimal CostPer1KOutputTokens { get; set; }
 }

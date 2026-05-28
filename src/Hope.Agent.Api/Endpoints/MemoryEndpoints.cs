@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Hope.Agent.Api.Middleware;
 using Hope.Agent.Application.Abstractions;
 using Hope.Agent.Application.LLM;
 using Hope.Agent.Domain.Memory;
@@ -12,7 +13,13 @@ public static class MemoryEndpoints
 {
     public static IEndpointRouteBuilder MapMemoryEndpoints(this IEndpointRouteBuilder app)
     {
-        var grp = app.MapGroup("/v1/memory").RequireAuthorization().WithTags("Memory");
+        var grp = app.MapGroup("/v1/memory")
+            .RequireAuthorization("TenantAccess")
+            .RequireAuthorization("PatientAccess")
+            .WithTags("Memory")
+            .WithBodySizeLimit(64 * 1024)
+            .WithRequestValidation()
+            .WithIdempotency();
 
         grp.MapPost("/upsert", async (
             [FromBody] MemoryUpsertRequest req,
@@ -57,7 +64,12 @@ public static class MemoryEndpoints
 
     private static Guid ResolveUserId(ClaimsPrincipal user, Guid? requested)
     {
-        if (requested is { } r && r != Guid.Empty) return r;
+        // Always derive the effective user ID from the JWT identity.
+        // A caller-supplied UserId is only honoured for service accounts with the
+        // "admin" role — any other caller having a userId in the request body is a
+        // mass-assignment / BOLA attempt and is silently ignored.
+        var isAdmin = user.IsInRole("admin") || user.IsInRole("system");
+        if (isAdmin && requested is { } r && r != Guid.Empty) return r;
         var sub = user.FindFirstValue(ClaimTypes.NameIdentifier) ?? user.FindFirstValue("sub");
         return Guid.TryParse(sub, out var id) ? id : Guid.Empty;
     }

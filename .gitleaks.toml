@@ -1,0 +1,13 @@
+title = "Hope.Agent Gitleaks Config"
+
+[allowlist]
+description = "Allow known safe placeholders"
+regexes = [
+  '''dev-secret-please-change-[0-9a-zA-Z\+\-]+''',
+  '''sk-\.\.\.''',
+  '''unknown@example\.com'''
+]
+paths = [
+  '''SECURITY_.*\.md''',
+  '''PHASE_19_.*\.md'''
+]

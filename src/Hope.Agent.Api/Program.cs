@@ -1,11 +1,17 @@
+using Azure.Extensions.AspNetCore.Configuration.Secrets;
+using Azure.Identity;
+using System.Net;
 using System.Text;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.HttpOverrides;
+using IPNetwork = Microsoft.AspNetCore.HttpOverrides.IPNetwork;
 using Hope.Agent.AgentRuntime;
 using Hope.Agent.Api.Endpoints;
 using Hope.Agent.Api.Health;
 using Hope.Agent.Api.Middleware;
 using Hope.Agent.Api.Security;
 using Hope.Agent.Application.Observability;
+using Hope.Agent.Application.Security;
 using Hope.Agent.Infrastructure;
 using Hope.Agent.LLMGateway;
 using Hope.Agent.MultiAgent;
@@ -17,6 +23,7 @@ using Hope.Agent.Tools.Mcp;
 using Hope.Agent.Workflows;
 using ModelContextProtocol.AspNetCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
@@ -28,9 +35,28 @@ using Serilog;
 
 var builder = WebApplication.CreateSlimBuilder(args);
 
+// ── Global request body ceiling ───────────────────────────────────────────
+// Drops the default Kestrel limit (30 MB) to 4 MB for all endpoints.
+// Specific groups that need tighter limits use WithBodySizeLimit() to narrow further;
+// groups that legitimately need more (e.g. file upload) can DisableRequestSizeLimit().
+builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 4 * 1024 * 1024);
+
+var keyVaultEnabled = builder.Configuration.GetValue<bool>("KeyVault:Enabled");
+var keyVaultName = builder.Configuration["KeyVault:VaultName"];
+if ((builder.Environment.IsProduction() || keyVaultEnabled) && !string.IsNullOrWhiteSpace(keyVaultName))
+{
+    builder.Configuration.AddAzureKeyVault(
+        new Uri($"https://{keyVaultName}.vault.azure.net/"),
+        new DefaultAzureCredential(),
+        new KeyVaultSecretManager());
+}
+
 builder.Host.UseSerilog((ctx, cfg) => cfg
     .ReadFrom.Configuration(ctx.Configuration)
     .Enrich.FromLogContext()
+    // Scrub PHI from any Hope.Agent.* domain object logged via {@obj} destructuring.
+    // Intercepts all string properties before they reach any sink (Console, OTLP, etc.).
+    .Destructure.With<PhiDestructuringPolicy>()
     .WriteTo.Console());
 
 builder.Services.AddAgentInfrastructure(builder.Configuration);
@@ -46,11 +72,61 @@ builder.Services.AddWorkflows(builder.Configuration);
 builder.Services.AddAgentRuntime(builder.Configuration);
 builder.Services.Configure<WebhookOptions>(builder.Configuration.GetSection(WebhookOptions.Section));
 
+// ── Trusted-proxy forwarded-header validation ─────────────────────────────
+// Must be configured before UseForwardedHeaders so RemoteIpAddress is the
+// real client IP when deployed behind a reverse proxy / load-balancer.
+// Only add networks listed in ReverseProxy:TrustedNetworks (CIDR notation).
+builder.Services.Configure<ForwardedHeadersOptions>(o =>
+{
+    o.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    o.ForwardLimit = 2;          // Trust at most 2 proxy hops
+    o.KnownNetworks.Clear();     // Start with explicit deny-all
+    o.KnownProxies.Clear();
+
+    // Loopback is always trusted (dev / health checks).
+    o.KnownNetworks.Add(new IPNetwork(IPAddress.Loopback, 8));
+    o.KnownNetworks.Add(new IPNetwork(IPAddress.IPv6Loopback, 128));
+
+    var trustedCidrs = builder.Configuration
+        .GetSection("ReverseProxy:TrustedNetworks").Get<string[]>() ?? [];
+    foreach (var cidr in trustedCidrs)
+    {
+        var slash = cidr.IndexOf('/', StringComparison.Ordinal);
+        if (slash > 0
+            && IPAddress.TryParse(cidr[..slash], out var addr)
+            && int.TryParse(cidr[(slash + 1)..], out var prefix))
+        {
+            o.KnownNetworks.Add(new IPNetwork(addr, prefix));
+        }
+    }
+});
+
 builder.Services.AddOpenApi();
 builder.Services.AddHealthChecks()
     .AddCheck<PostgresHealthCheck>("postgres", tags: ["ready"])
     .AddCheck<RedisHealthCheck>("redis", tags: ["ready"]);
-builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<SafeExceptionHandler>();
+builder.Services.AddProblemDetails(opts =>
+{
+    opts.CustomizeProblemDetails = ctx =>
+    {
+        // Always stamp every problem response with a correlation ID for traceability.
+        ctx.ProblemDetails.Extensions["correlationId"] = ctx.HttpContext.TraceIdentifier;
+
+        // In production: strip detail and instance so internal paths/messages never reach clients.
+        if (!ctx.HttpContext.RequestServices
+                .GetRequiredService<IWebHostEnvironment>().IsDevelopment())
+        {
+            // Scrub through PHI redactor in case an upstream handler set Detail to an error string.
+            var redactor = ctx.HttpContext.RequestServices
+                .GetRequiredService<Hope.Agent.Application.Security.IPhiRedactor>();
+            if (!string.IsNullOrEmpty(ctx.ProblemDetails.Detail))
+                ctx.ProblemDetails.Detail = redactor.Redact(ctx.ProblemDetails.Detail);
+            // Remove Instance (request path) — may contain PHI in query-strings.
+            ctx.ProblemDetails.Instance = null;
+        }
+    };
+});
 builder.Services.AddMemoryCache();
 
 builder.Services.AddRateLimiter(o =>
@@ -100,13 +176,96 @@ builder.Services.AddRateLimiter(o =>
             AutoReplenishment = true,
         });
     });
+    o.AddPolicy("diagnostics", ctx =>
+    {
+        var key = ctx.User.Identity?.IsAuthenticated == true
+            ? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "diagnostics:anon"
+            : $"diagnostics:{ctx.Connection.RemoteIpAddress}";
+        return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 20,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+    });
+    o.AddPolicy("openapi-docs", ctx =>
+    {
+        var key = ctx.User.Identity?.IsAuthenticated == true
+            ? ctx.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "openapi:anon"
+            : $"openapi:{ctx.Connection.RemoteIpAddress}";
+        return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+    });
+    // Auth login: 10 req/min per IP — brute-force protection on credential exchange.
+    o.AddPolicy("auth-login", ctx =>
+    {
+        var key = $"auth-login:{ctx.Connection.RemoteIpAddress}";
+        return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 10,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+    });
+    // Auth refresh/revoke: 60 req/min per IP — tighter than global but allows normal rotation.
+    o.AddPolicy("auth-refresh", ctx =>
+    {
+        var key = $"auth-refresh:{ctx.Connection.RemoteIpAddress}";
+        return RateLimitPartition.GetFixedWindowLimiter(key, _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = 60,
+            Window = TimeSpan.FromMinutes(1),
+            QueueLimit = 0,
+            AutoReplenishment = true,
+        });
+    });
 });
 
 var jwt = builder.Configuration.GetSection("Jwt");
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(o =>
     {
-        o.RequireHttpsMetadata = false;
+        o.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
+    })
+    .AddScheme<ApiKeyAuthOptions, ApiKeyAuthHandler>(ApiKeyAuthHandler.SchemeName, _ => { });
+builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
+    .Configure<Hope.Agent.Application.Security.IJwtKeyProvider>((o, keyProvider) =>
+    {
+        var keySet = keyProvider.GetSigningKeys();
+        var isRsa = string.Equals(keySet.Algorithm, "RS256", StringComparison.OrdinalIgnoreCase);
+        if (!builder.Environment.IsDevelopment() && !isRsa && string.IsNullOrWhiteSpace(keySet.CurrentSecret))
+            throw new InvalidOperationException("Jwt:Secret must be configured in production (prefer Key Vault). ");
+
+        var signingKeys = new List<SecurityKey>();
+        var currentKid = string.IsNullOrWhiteSpace(keySet.KeyId) ? "current" : keySet.KeyId;
+        var previousKid = string.IsNullOrWhiteSpace(keySet.PreviousKeyId) ? "previous" : keySet.PreviousKeyId;
+
+        if (isRsa)
+        {
+            var rsa = System.Security.Cryptography.RSA.Create();
+            rsa.ImportFromPem(keySet.CurrentPublicKeyPem);
+            signingKeys.Add(new RsaSecurityKey(rsa) { KeyId = currentKid });
+            if (!string.IsNullOrWhiteSpace(keySet.PreviousPublicKeyPem))
+            {
+                var prev = System.Security.Cryptography.RSA.Create();
+                prev.ImportFromPem(keySet.PreviousPublicKeyPem);
+                signingKeys.Add(new RsaSecurityKey(prev) { KeyId = previousKid });
+            }
+        }
+        else
+        {
+            signingKeys.Add(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(keySet.CurrentSecret)) { KeyId = currentKid });
+            if (!string.IsNullOrWhiteSpace(keySet.PreviousSecret))
+                signingKeys.Add(new SymmetricSecurityKey(Encoding.UTF8.GetBytes(keySet.PreviousSecret)) { KeyId = previousKid });
+        }
+
         o.TokenValidationParameters = new TokenValidationParameters
         {
             ValidateIssuer = true,
@@ -115,11 +274,10 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             ValidateIssuerSigningKey = true,
             ValidIssuer = jwt["Issuer"],
             ValidAudience = jwt["Audience"],
-            IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwt["Secret"] ?? "dev-secret-please-change-32+chars-min")),
+            IssuerSigningKeys = signingKeys,
             ClockSkew = TimeSpan.FromSeconds(30),
         };
-    })
-    .AddScheme<ApiKeyAuthOptions, ApiKeyAuthHandler>(ApiKeyAuthHandler.SchemeName, _ => { });
+    });
 builder.Services.AddAuthorization(o =>
 {
     // McpPolicy: accept either JWT Bearer (scope claim) OR API Key header
@@ -127,6 +285,48 @@ builder.Services.AddAuthorization(o =>
         .AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme, ApiKeyAuthHandler.SchemeName)
         .RequireAuthenticatedUser()
         .RequireClaim("scope", "hope-agent:mcp"));
+
+    // PatientAccess: caller must be admin/system, accessing their own data,
+    // or have the target id explicitly listed in the "patients" claim.
+    // Closes the broad-BOLA gap (C2).
+    o.AddPolicy("PatientAccess", p => p
+        .RequireAuthenticatedUser()
+        .AddRequirements(new PatientAccessRequirement()));
+
+    // TenantAccess: caller's "tenant" claim must match the resource tenant.
+    // Closes the cross-tenant data-leak gap (C5).
+    o.AddPolicy("TenantAccess", p => p
+        .RequireAuthenticatedUser()
+        .AddRequirements(new TenantRequirement()));
+
+    // OpenApiAccess: only tokens with the openapi scope (or admin/system role) may
+    // retrieve the API specification in non-development environments (H8).
+    o.AddPolicy("OpenApiAccess", p => p
+        .RequireAuthenticatedUser()
+        .RequireAssertion(ctx =>
+            ctx.User.HasClaim("scope", "hope-agent:docs") ||
+            ctx.User.IsInRole("admin") ||
+            ctx.User.IsInRole("system")));
+});
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<IAuthorizationHandler, PatientAccessHandler>();
+builder.Services.AddSingleton<IAuthorizationHandler, TenantHandler>();
+
+// ── Token issuance services ──────────────────────────────────────────────
+builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));
+builder.Services.AddSingleton<ITokenService, JwtTokenService>();
+
+builder.Services.AddCors(o =>
+{
+    var allowedDomains = builder.Configuration.GetSection("Cors:AllowedDomains").Get<string[]>()
+        ?? ["http://localhost:3000", "http://localhost:5000"];
+    o.AddPolicy("StrictCors", p => p
+        .WithOrigins(allowedDomains)
+        .AllowAnyMethod()
+        .AllowAnyHeader()
+        .AllowCredentials()
+        .WithExposedHeaders("X-Request-Id", "Idempotent-Replayed", "Retry-After")
+        .SetPreflightMaxAge(TimeSpan.FromHours(1)));
 });
 
 var otlp = builder.Configuration["Otel:Endpoint"] ?? "http://localhost:4317";
@@ -140,6 +340,9 @@ builder.Services.AddOpenTelemetry()
         .AddSource("Hope.Agent.Workflows")
         .AddSource("Hope.Agent.Rag")
         .AddSource("Hope.Agent.LLM")
+        // Scrub PHI from span attributes (http.url, db.statement, exception.message, etc.)
+        // before they leave this process. Must be added before the OTLP exporter.
+        .AddProcessor(new PhiSpanProcessor())
         .AddOtlpExporter(o => o.Endpoint = new Uri(otlp)))
     .WithMetrics(m => m
         .AddAspNetCoreInstrumentation()
@@ -158,15 +361,79 @@ builder.Logging.AddOpenTelemetry(o =>
 
 var app = builder.Build();
 
+// ── Startup secret validation ─────────────────────────────────────────────
+// Fail fast if mandatory secrets are absent or are still dev placeholders.
+// Skipped automatically in Development so localhost runs are unaffected.
+StartupSecretValidator.Validate(
+    app.Configuration,
+    app.Environment,
+    app.Logger);
+
+// Resolve real client IP from X-Forwarded-For before any IP-dependent middleware.
+app.UseForwardedHeaders();
 app.UseSerilogRequestLogging();
 app.UseExceptionHandler();
+app.UseMiddleware<ContentTypeGuardMiddleware>();
+app.UseMiddleware<RequestContextMiddleware>();
+app.UseMiddleware<ApiVersionGuardMiddleware>();
+if (app.Environment.IsProduction())
+{
+    app.UseHttpsRedirection();
+}
 app.UseStatusCodePages();
+app.UseCors("StrictCors");
 app.UseMiddleware<SecurityHeadersMiddleware>();
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseMiddleware<AuditLoggingMiddleware>();
 
-app.MapOpenApi();
+var exposeOpenApiInProd = builder.Configuration.GetValue<bool>("OpenApi:EnabledInProduction");
+if (app.Environment.IsDevelopment() || exposeOpenApiInProd)
+{
+    var openApiEndpoint = app.MapOpenApi();
+    if (!app.Environment.IsDevelopment())
+    {
+        openApiEndpoint.RequireAuthorization("OpenApiAccess");
+        openApiEndpoint.RequireRateLimiting("openapi-docs");
+    }
+}
+// ── RFC 9116 security.txt ────────────────────────────────────────────────────
+// Public endpoint — no authentication, no rate-limiting, intentionally cacheable.
+// Tells security researchers where to report vulnerabilities.
+app.MapGet("/.well-known/security.txt", (IConfiguration cfg) =>
+{
+    var contact = cfg["SecurityTxt:Contact"] ?? "mailto:security@hope.hospital.com";
+    var policy = cfg["SecurityTxt:Policy"] ?? "https://hope.hospital.com/security-policy";
+    var acks = cfg["SecurityTxt:Acknowledgments"];
+    var langs = cfg["SecurityTxt:PreferredLanguages"] ?? "en";
+
+    // RFC 9116 §2.5.5: Expires MUST be present; value MUST NOT be more than 1 year in the future.
+    var expires = DateTimeOffset.UtcNow.AddMonths(11).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'");
+
+    var sb = new System.Text.StringBuilder();
+    sb.AppendLine($"Contact: {contact}");
+    sb.AppendLine($"Expires: {expires}");
+    sb.AppendLine($"Policy: {policy}");
+    if (!string.IsNullOrWhiteSpace(acks))
+        sb.AppendLine($"Acknowledgments: {acks}");
+    sb.AppendLine($"Preferred-Languages: {langs}");
+
+    return Results.Text(
+        sb.ToString(),
+        contentType: "text/plain; charset=utf-8");
+})
+.AllowAnonymous()
+.WithTags("Meta")
+.WithName("SecurityTxt")
+.AddEndpointFilter(async (ctx, next) =>
+{
+    // RFC 9116 §2.5.4: responses SHOULD be cached.
+    // Override the global no-store header set by SecurityHeadersMiddleware.
+    ctx.HttpContext.Response.Headers.CacheControl = "public, max-age=86400";
+    return await next(ctx);
+});
+
 app.MapHealthChecks("/healthz");
 app.MapHealthChecks("/healthz/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
@@ -176,6 +443,8 @@ app.MapHealthChecks("/healthz/ready", new Microsoft.AspNetCore.Diagnostics.Healt
 {
     Predicate = h => h.Tags.Contains("ready"),
 });
+app.MapAuthEndpoints();
+app.MapJwks();
 app.MapAgentEndpoints();
 app.MapRagEndpoints();
 app.MapMemoryEndpoints();

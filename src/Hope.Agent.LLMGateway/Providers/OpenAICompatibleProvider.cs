@@ -37,6 +37,7 @@ public sealed class OpenAICompatibleProvider(HttpClient http, OpenAICompatibleOp
         var usage = json.TryGetProperty("usage", out var u)
             ? new ChatUsage(u.GetProperty("prompt_tokens").GetInt32(), u.GetProperty("completion_tokens").GetInt32(), u.GetProperty("total_tokens").GetInt32())
             : new ChatUsage(0, 0, 0);
+        usage = usage with { CostUsd = ComputeCost(usage, options) };
         var finish = choice.TryGetProperty("finish_reason", out var f) ? f.GetString() ?? "stop" : "stop";
         return new ChatResponse(content, toolCalls, finish, usage, Name, request.Model ?? options.Model);
     }
@@ -120,8 +121,29 @@ public sealed class OpenAICompatibleProvider(HttpClient http, OpenAICompatibleOp
             }).ToList();
             if (!string.IsNullOrEmpty(request.ToolChoice)) dict["tool_choice"] = request.ToolChoice;
         }
+        if (request.ResponseFormat is { } rf)
+        {
+            dict["response_format"] = rf.Type switch
+            {
+                "json_object" => (object)new { type = "json_object" },
+                "json_schema" when !string.IsNullOrEmpty(rf.JsonSchema) => new
+                {
+                    type = "json_schema",
+                    json_schema = new
+                    {
+                        name = rf.SchemaName ?? "response",
+                        schema = JsonDocument.Parse(rf.JsonSchema!).RootElement,
+                        strict = rf.Strict,
+                    },
+                },
+                _ => new { type = "text" },
+            };
+        }
         return dict;
     }
+
+    internal static decimal ComputeCost(ChatUsage usage, OpenAICompatibleOptions opts)
+        => (usage.PromptTokens * opts.CostPer1KInputTokens + usage.CompletionTokens * opts.CostPer1KOutputTokens) / 1000m;
 
     internal static readonly JsonSerializerOptions JsonOpts = new(JsonSerializerDefaults.Web)
     {

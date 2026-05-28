@@ -62,6 +62,7 @@ internal sealed class AgentOrchestrator(
     IAuditSink audit,
     IPromptShield shield,
     IPhiRedactor phi,
+    IPromptEgressGuard egressGuard,
     IClock clock,
     IOptions<AgentRuntimeOptions> opts,
     ILogger<AgentOrchestrator> log,
@@ -140,6 +141,7 @@ internal sealed class AgentOrchestrator(
         var toolExecutions = new List<AgentToolExecution>();
 
         int promptTokens = 0, completionTokens = 0;
+        decimal costUsd = 0m;
         string provider = chat.Name, model = string.Empty;
         string finalContent = string.Empty;
 
@@ -150,6 +152,7 @@ internal sealed class AgentOrchestrator(
             model = resp.Model;
             promptTokens += resp.Usage.PromptTokens;
             completionTokens += resp.Usage.CompletionTokens;
+            costUsd += resp.Usage.CostUsd;
 
             if (resp.ToolCalls.Count == 0)
             {
@@ -223,6 +226,10 @@ internal sealed class AgentOrchestrator(
         var modelTag = new KeyValuePair<string, object?>("model", model);
         HopeMeters.LlmPromptTokens.Add(promptTokens, providerTag, modelTag);
         HopeMeters.LlmCompletionTokens.Add(completionTokens, providerTag, modelTag);
+        if (costUsd > 0m)
+        {
+            HopeMeters.LlmCostUsd.Add((double)costUsd, providerTag, modelTag);
+        }
         HopeMeters.AgentRuns.Add(1, new KeyValuePair<string, object?>("outcome", "ok"));
         HopeMeters.AgentRunDurationMs.Record(sw.Elapsed.TotalMilliseconds, providerTag, modelTag);
 
@@ -248,7 +255,19 @@ internal sealed class AgentOrchestrator(
             finalContent = shieldResult.SafeContent;
         }
 
-        return new AgentResponse(conv.Id, finalContent, toolExecutions, promptTokens, completionTokens, provider, model, sw.Elapsed);
+        // ── LLM01/LLM06 egress: strip spotlight tokens + redact PHI before the response
+        //    leaves this process. Defence-in-depth layer over the output shield above.
+        var egressCtx = new EgressContext(request.UserId, CallerSubject: null, AllowedPatientIds: []);
+        var egressResult = egressGuard.Inspect(finalContent, egressCtx);
+        if (!egressResult.Allowed)
+        {
+            log.LogWarning("egress.blocked reasons={Reasons} userId={UserId}",
+                string.Join(",", egressResult.Reasons), request.UserId);
+            HopeMeters.AgentRuns.Add(1, new KeyValuePair<string, object?>("outcome", "egress_blocked"));
+        }
+        finalContent = egressResult.SanitizedResponse;
+
+        return new AgentResponse(conv.Id, finalContent, toolExecutions, promptTokens, completionTokens, provider, model, sw.Elapsed, costUsd);
     }
 
     public async IAsyncEnumerable<string> StreamAsync(AgentRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
@@ -308,10 +327,13 @@ internal sealed class AgentOrchestrator(
         ClinicalContextFragment? clinicalFragment = null)
     {
         var list = new List<ChatMessage> { new("system", _opts.SystemPrompt) };
+        // LLM01: spotlighting — instructs the model that delimited blocks are data, never instructions.
+        list.Add(new ChatMessage("system", PromptSpotlight.SystemDirective));
         if (clinicalFragment is not null && !string.IsNullOrWhiteSpace(clinicalFragment.Content))
         {
+            // Clinical context arrives from external HIS/EMR sources — treat as untrusted.
             list.Add(new ChatMessage("system",
-                $"Clinical context for profile '{clinicalFragment.Profile}':\n{clinicalFragment.Content}"));
+                $"Clinical context for profile '{clinicalFragment.Profile}':\n{PromptSpotlight.Wrap(clinicalFragment.Content)}"));
         }
         if (traits is { IsEmpty: false })
         {
@@ -324,12 +346,15 @@ internal sealed class AgentOrchestrator(
         }
         if (mems.Count > 0)
         {
-            var memText = string.Join("\n", mems.Select((m, i) => $"[{i + 1}] ({m.Record.Kind}) {m.Record.Content}"));
+            // Memory hits are derived from user-supplied text; each chunk is spotlighted
+            // so injected instructions embedded in stored memory cannot hijack the model.
+            var memText = string.Join("\n", mems.Select((m, i) => $"[{i + 1}] ({m.Record.Kind}) {PromptSpotlight.Wrap(m.Record.Content)}"));
             list.Add(new ChatMessage("system", $"Relevant long-term memory:\n{memText}"));
         }
         if (skills.Count > 0)
         {
-            var skillText = string.Join("\n", skills.Select((s, i) => $"[{i + 1}] {s.AnswerTemplate} (reward={s.Reward:F2}, used={s.UsageCount})"));
+            // Skill answer templates are distilled from past runs and may embed user phrasing.
+            var skillText = string.Join("\n", skills.Select((s, i) => $"[{i + 1}] {PromptSpotlight.Wrap(s.AnswerTemplate)} (reward={s.Reward:F2}, used={s.UsageCount})"));
             list.Add(new ChatMessage("system", $"Patterns that worked well before for similar requests:\n{skillText}"));
             HopeMeters.SkillHits.Add(skills.Count);
         }

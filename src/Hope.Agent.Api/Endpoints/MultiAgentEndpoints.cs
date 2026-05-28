@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Hope.Agent.Api.Middleware;
 using Hope.Agent.Application.Agents.Multi;
 using Microsoft.AspNetCore.Mvc;
 
@@ -8,7 +9,12 @@ public static class MultiAgentEndpoints
 {
     public static IEndpointRouteBuilder MapMultiAgentEndpoints(this IEndpointRouteBuilder app)
     {
-        var grp = app.MapGroup("/v1/multi-agent").RequireAuthorization().WithTags("MultiAgent");
+        var grp = app.MapGroup("/v1/multi-agent")
+            .RequireAuthorization()
+            .WithTags("MultiAgent")
+            .WithBodySizeLimit(64 * 1024)
+            .WithRequestValidation()
+            .WithIdempotency();
 
         grp.MapPost("/dispatch", async (
             [FromBody] MultiAgentDispatchRequest req,

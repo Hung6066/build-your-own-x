@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Hope.Agent.Api.Middleware;
 using Hope.Agent.Application.Channels;
 using Hope.Agent.Infrastructure.Channels.Slack;
 using Hope.Agent.Infrastructure.Channels.Zalo;
@@ -15,7 +16,9 @@ public static class ChannelEndpoints
 
     public static IEndpointRouteBuilder MapChannelEndpoints(this IEndpointRouteBuilder app)
     {
-        var grp = app.MapGroup("/v1/channels").WithTags("Channels");
+        var grp = app.MapGroup("/v1/channels")
+            .WithTags("Channels")
+            .WithBodySizeLimit(128 * 1024);   // 128 KB — channel webhook payloads
 
         MapZalo(grp);
         MapSlack(grp);

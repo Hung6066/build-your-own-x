@@ -2,6 +2,8 @@ using Hope.Agent.AgentRuntime.Roles;
 using Hope.Agent.AgentRuntime.Subagents;
 using Hope.Agent.Application.Agents;
 using Hope.Agent.Application.Agents.Multi;
+using Hope.Agent.Application.Caching;
+using Hope.Agent.Application.Plans;
 using Hope.Agent.Application.Subagents;
 using Hope.Agent.Shared;
 using Microsoft.Extensions.Configuration;
@@ -19,6 +21,13 @@ public static class DependencyInjection
         services.AddScoped<Hope.Agent.AgentRuntime.Security.SandboxedToolExecutor>();
         services.AddScoped<IAgentRuntime, AgentOrchestrator>();
         services.AddSingleton<ISubagentPool, ParallelSubagentPool>();
+
+        // ── Tier S defaults: no-op caches & plan tracker. Swap to Redis-backed
+        //    implementations in Infrastructure to activate semantic cache, tool
+        //    result cache, and persistent agent plan tracker.
+        services.AddSingleton<ISemanticChatCache, NoOpSemanticChatCache>();
+        services.AddSingleton<IToolResultCache, NoOpToolResultCache>();
+        services.AddSingleton<IAgentPlanTracker, NoOpAgentPlanTracker>();
 
         // ── Clinical workflow agent roles ────────────────────────────────────
         services.AddScoped<IAgentRole, SchedulingAgentRole>();

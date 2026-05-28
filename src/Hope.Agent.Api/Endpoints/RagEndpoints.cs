@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Hope.Agent.Api.Middleware;
 using Hope.Agent.Application.Rag;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
@@ -9,7 +10,12 @@ public static class RagEndpoints
 {
     public static IEndpointRouteBuilder MapRagEndpoints(this IEndpointRouteBuilder app)
     {
-        var grp = app.MapGroup("/v1/rag").RequireAuthorization().WithTags("RAG");
+        var grp = app.MapGroup("/v1/rag")
+            .RequireAuthorization()
+            .WithTags("RAG")
+            .WithBodySizeLimit(512 * 1024)   // 512 KB — clinical documents can be large
+            .WithRequestValidation()
+            .WithIdempotency();
 
         grp.MapPost("/documents", async (
             [FromBody] IngestDocumentRequest req,

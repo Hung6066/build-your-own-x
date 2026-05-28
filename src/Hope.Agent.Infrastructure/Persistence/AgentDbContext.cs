@@ -70,9 +70,17 @@ public sealed class AgentDbContext(DbContextOptions<AgentDbContext> options) : D
         {
             e.ToTable("audit_logs");
             e.HasKey(x => x.Id);
+            e.Property(x => x.Actor).HasMaxLength(256);
+            e.Property(x => x.Action).HasMaxLength(64);
+            e.Property(x => x.ResourceType).HasMaxLength(128);
+            e.Property(x => x.ResourceId).HasMaxLength(512);
+            e.Property(x => x.PatientId).HasMaxLength(64);
+            e.Property(x => x.CorrelationId).HasMaxLength(128);
             e.Property(x => x.PayloadJson).HasColumnType("jsonb");
             e.HasIndex(x => new { x.OccurredAt, x.Action });
             e.HasIndex(x => x.CorrelationId);
+            e.HasIndex(x => new { x.UserId, x.OccurredAt });
+            e.HasIndex(x => x.ResourceType);
         });
         b.Entity<Document>(e =>
         {

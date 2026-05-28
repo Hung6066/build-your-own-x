@@ -18,6 +18,15 @@ public static class HopeMeters
     public static readonly Counter<long> LlmCompletionTokens =
         Meter.CreateCounter<long>("hope_llm_completion_tokens", unit: "tokens", description: "Total completion tokens by provider/model.");
 
+    public static readonly Counter<double> LlmCostUsd =
+        Meter.CreateCounter<double>("hope_llm_cost_usd", unit: "usd", description: "Estimated LLM spend in USD by provider/model.");
+
+    public static readonly Counter<long> SemanticCacheHits =
+        Meter.CreateCounter<long>("hope_semantic_cache_hits_total", description: "Semantic chat-cache hits avoiding an LLM call.");
+
+    public static readonly Counter<long> ToolCacheHits =
+        Meter.CreateCounter<long>("hope_tool_cache_hits_total", description: "Tool-result cache hits by tool name.");
+
     public static readonly Counter<long> AgentRuns =
         Meter.CreateCounter<long>("hope_agent_runs_total", description: "Total agent.run invocations by outcome.");
 

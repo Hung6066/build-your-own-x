@@ -41,6 +41,7 @@ public sealed class GeminiProvider(HttpClient http, GeminiOptions options) : ICh
                 u.TryGetProperty("candidatesTokenCount", out var ct2) ? ct2.GetInt32() : 0,
                 u.TryGetProperty("totalTokenCount", out var tt) ? tt.GetInt32() : 0)
             : new ChatUsage(0, 0, 0);
+        usage = usage with { CostUsd = (usage.PromptTokens * options.CostPer1KInputTokens + usage.CompletionTokens * options.CostPer1KOutputTokens) / 1000m };
         return new ChatResponse(content, toolCalls, "stop", usage, Name, model);
     }
 
@@ -102,14 +103,23 @@ public sealed class GeminiProvider(HttpClient http, GeminiOptions options) : ICh
                 parts = new[] { new { text = m.Content } },
             }).ToList();
         var system = request.Messages.Where(m => m.Role == "system").Select(m => m.Content).ToArray();
+        var generationConfig = new Dictionary<string, object?>
+        {
+            ["temperature"] = request.Temperature,
+            ["maxOutputTokens"] = request.MaxTokens,
+        };
+        if (request.ResponseFormat is { Type: "json_object" or "json_schema" } rf)
+        {
+            generationConfig["responseMimeType"] = "application/json";
+            if (rf.Type == "json_schema" && !string.IsNullOrEmpty(rf.JsonSchema))
+            {
+                generationConfig["responseSchema"] = JsonDocument.Parse(rf.JsonSchema!).RootElement;
+            }
+        }
         var dict = new Dictionary<string, object?>
         {
             ["contents"] = contents,
-            ["generationConfig"] = new
-            {
-                temperature = request.Temperature,
-                maxOutputTokens = request.MaxTokens,
-            },
+            ["generationConfig"] = generationConfig,
         };
         if (system.Length > 0) dict["systemInstruction"] = new { parts = system.Select(s => new { text = s }).ToArray() };
         if (request.Tools is { Count: > 0 })

@@ -6,6 +6,17 @@ namespace Hope.Agent.Application.Tools;
 public interface IAgentTool
 {
     ToolDefinition Definition { get; }
+
+    /// <summary>
+    /// When <c>true</c>, identical (toolName, argumentsJson, userId) invocations may be served
+    /// from <see cref="Hope.Agent.Application.Caching.IToolResultCache"/>. Default <c>false</c> —
+    /// only enable on tools whose outputs depend solely on inputs (idempotent reads).
+    /// </summary>
+    bool IsCacheable => false;
+
+    /// <summary>Time-to-live for cached results when <see cref="IsCacheable"/> is <c>true</c>.</summary>
+    TimeSpan CacheTtl => TimeSpan.FromMinutes(15);
+
     Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct);
 }
 

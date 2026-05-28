@@ -1,4 +1,6 @@
+using System.ComponentModel.DataAnnotations;
 using System.Security.Claims;
+using Hope.Agent.Api.Middleware;
 using Hope.Agent.Application.Agents;
 using Microsoft.AspNetCore.Mvc;
 
@@ -11,7 +13,11 @@ public static class AgentEndpoints
 {
     public static IEndpointRouteBuilder MapAgentEndpoints(this IEndpointRouteBuilder app)
     {
-        var grp = app.MapGroup("/v1/agent").RequireAuthorization().WithTags("Agent");
+        var grp = app.MapGroup("/v1/agent")
+            .RequireAuthorization()
+            .WithTags("Agent")
+            .WithBodySizeLimit(64 * 1024)
+            .WithRequestValidation();  // 64 KB — message cap already enforced at 8000 chars
 
         grp.MapPost("/chat", async (
             [FromBody] AgentChatRequest req,
@@ -20,6 +26,20 @@ public static class AgentEndpoints
             HttpContext http,
             CancellationToken ct) =>
         {
+            if (string.IsNullOrWhiteSpace(req.Message))
+                return Results.BadRequest("Message is required.");
+
+            if (req.Message.Length > 8000)
+                return Results.BadRequest("Message exceeds maximum length (8000).");
+
+            var lowered = req.Message.ToLowerInvariant();
+            if (lowered.Contains("drop table", StringComparison.Ordinal)
+                || lowered.Contains("delete from", StringComparison.Ordinal)
+                || lowered.Contains("'; --", StringComparison.Ordinal))
+            {
+                return Results.BadRequest("Suspicious input detected.");
+            }
+
             var sub = user.FindFirstValue(ClaimTypes.NameIdentifier) ?? user.FindFirstValue("sub");
             var userId = Guid.TryParse(sub, out var id) ? id : Guid.Empty;
 
@@ -38,6 +58,8 @@ public static class AgentEndpoints
 }
 
 public sealed record AgentChatRequest(
+    [StringLength(8000, MinimumLength = 1)]
+    [RegularExpression(@"^[\p{L}\p{N}\p{P}\p{Z}]+$", ErrorMessage = "Message contains invalid characters")]
     string Message,
     Guid? ConversationId = null,
     Dictionary<string, string>? Context = null);

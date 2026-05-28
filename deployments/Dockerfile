@@ -13,8 +13,13 @@ ENV ASPNETCORE_URLS=http://+:8080 \
     DOTNET_RUNNING_IN_CONTAINER=true \
     DOTNET_gcServer=1 \
     DOTNET_TieredPGO=1
-RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
-COPY --from=build /app ./
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 1000 hope \
+    && useradd  --system --uid 1000 --gid 1000 --home /app --shell /usr/sbin/nologin hope
+COPY --from=build --chown=hope:hope /app ./
 EXPOSE 8080
 ENV ENTRY_DLL=${PROJECT}.dll
+USER 1000:1000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://localhost:8080/healthz/live || exit 1
 ENTRYPOINT ["sh", "-c", "exec dotnet $ENTRY_DLL"]

@@ -1,0 +1,49 @@
+name: security-ci
+
+on:
+    push:
+        branches: ["main", "develop"]
+    pull_request:
+        branches: ["*"]
+    schedule:
+        - cron: "0 2 * * 1"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    security:
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup .NET
+              uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: "9.0.x"
+
+            - name: Restore
+              run: dotnet restore Hope.Agent.sln
+
+            - name: Build
+              run: dotnet build Hope.Agent.sln -c Release --nologo -v minimal
+
+            - name: Install CycloneDX tool
+              run: dotnet tool install --global CycloneDX
+
+            - name: Security checks with threshold
+              shell: pwsh
+              run: |
+                  $env:PATH = "$env:PATH:$HOME/.dotnet/tools"
+                  ./tools/hope-security.ps1 -Solution Hope.Agent.sln -IncludeTransitive -FailOnSeverity High -GenerateSbom
+
+            - name: Upload security artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: security-reports
+                  path: |
+                      artifacts/security/**
+                      artifacts/sbom/**

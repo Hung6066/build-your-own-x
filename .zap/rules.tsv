@@ -1,0 +1,31 @@
+# ZAP rule overrides for Hope.Agent
+# Format: ruleId TAB action TAB evidence TAB parameter TAB other
+# Actions: PASS, IGNORE, WARN, FAIL
+# Full rule list: https://www.zaproxy.org/docs/alerts/
+
+# 10035 – Strict-Transport-Security header not set: suppress for non-HTTPS targets
+10035	WARN
+
+# 10036 – Server leaks information via X-Powered-By: we remove it
+10036	IGNORE
+
+# 10037 – Server leaks version information: handled by SecurityHeadersMiddleware
+10037	IGNORE
+
+# 10049 – Storable and Cacheable Content: we set Cache-Control: no-store on all responses
+10049	WARN
+
+# 10054 – Cookie without SameSite Attribute: API uses bearer tokens, not cookies
+10054	IGNORE
+
+# 10055 – CSP Scanner: treat CSP issues as warnings only
+10055	WARN
+
+# 10096 – Timestamp Disclosure: already removed via SecurityHeadersMiddleware
+10096	IGNORE
+
+# 40012 – Cross-Site Request Forgery: handled by strict CORS + bearer-only auth
+40012	WARN
+
+# 90001 – Charset Mismatch (Header vs Meta): API returns JSON, no HTML
+90001	IGNORE

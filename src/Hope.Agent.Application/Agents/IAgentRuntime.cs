@@ -17,7 +17,8 @@ public sealed record AgentResponse(
     int CompletionTokens,
     string Provider,
     string Model,
-    TimeSpan Duration);
+    TimeSpan Duration,
+    decimal CostUsd = 0m);
 
 public sealed record AgentToolExecution(string Tool, string ArgumentsJson, string ResultJson, TimeSpan Duration, bool Success);
 

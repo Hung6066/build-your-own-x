@@ -1,3 +1,5 @@
+using System.Net.Security;
+using System.Security.Authentication;
 using Hope.Agent.Application.Abstractions;
 using Hope.Agent.Application.Channels;
 using Hope.Agent.Application.Compression;
@@ -43,20 +45,59 @@ public static class DependencyInjection
 {
     public static IServiceCollection AddAgentInfrastructure(this IServiceCollection services, IConfiguration cfg)
     {
+        var environment = cfg["ASPNETCORE_ENVIRONMENT"] ?? cfg["DOTNET_ENVIRONMENT"];
+        var isDevelopment = string.Equals(environment, "Development", StringComparison.OrdinalIgnoreCase);
+
         services.AddDbContextPool<AgentDbContext>(o =>
-            o.UseNpgsql(cfg.GetConnectionString("Postgres"), npg => npg.EnableRetryOnFailure(3)));
+        {
+            var connStr = cfg.GetConnectionString("Postgres") ?? throw new InvalidOperationException("Missing Postgres connection string.");
+            if (!isDevelopment && !connStr.Contains("SSL Mode", StringComparison.OrdinalIgnoreCase))
+                connStr += ";SSL Mode=Require;Trust Server Certificate=false";
+
+            o.UseNpgsql(connStr, npg => npg.EnableRetryOnFailure(3));
+        });
 
         services.AddScoped<IConversationRepository, EfConversationRepository>();
-        services.AddScoped<IAuditSink, EfAuditSink>();
+        // Tamper-evident audit chain: EfAuditSink is the persistent sink, wrapped by
+        // HashChainedAuditSink which links every event to its predecessor via SHA-256.
+        services.AddScoped<EfAuditSink>();
+        services.AddScoped<IAuditSink>(sp => new HashChainedAuditSink(
+            sp.GetRequiredService<EfAuditSink>(),
+            sp.GetRequiredService<IConnectionMultiplexer>(),
+            sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<HashChainedAuditSink>>()));
+        services.AddSingleton<IJwtKeyProvider, RotatingJwtKeyProvider>();
 
         services.AddSingleton<IConnectionMultiplexer>(_ =>
-            ConnectionMultiplexer.Connect(cfg.GetConnectionString("Redis") ?? "localhost:6379"));
+        {
+            var redisConn = cfg.GetConnectionString("Redis") ?? "localhost:6379";
+            var options = ConfigurationOptions.Parse(redisConn);
+            if (!isDevelopment)
+            {
+                options.Ssl = true;
+                options.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13;
+                options.AbortOnConnectFail = false;
+            }
+
+            return ConnectionMultiplexer.Connect(options);
+        });
 
         // Embedding vector cache — Redis-backed, avoids re-embedding identical text under load.
         services.Configure<EmbeddingCacheOptions>(cfg.GetSection(EmbeddingCacheOptions.Section));
         services.AddSingleton<IEmbeddingCache, RedisEmbeddingCache>();
 
         var qdrant = cfg.GetSection("Qdrant").Get<QdrantOptions>() ?? new QdrantOptions();
+        if (!isDevelopment)
+        {
+            if (qdrant.Host.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            {
+                qdrant.Host = "https://" + qdrant.Host["http://".Length..];
+            }
+            else if (!qdrant.Host.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                qdrant.Host = $"https://{qdrant.Host}";
+            }
+        }
+
         services.AddSingleton(qdrant);
         services.AddSingleton(_ => new QdrantClient(qdrant.Host, qdrant.Port, apiKey: qdrant.ApiKey));
         services.AddSingleton<IMemoryStore, QdrantMemoryStore>();
@@ -69,6 +110,10 @@ public static class DependencyInjection
         services.AddSingleton<IEventConsumer, KafkaEventConsumer>();
 
         services.AddSingleton<IPhiRedactor, RegexPhiRedactor>();
+        services.AddSingleton<IPromptEgressGuard, RegexPromptEgressGuard>();
+        services.AddSingleton<IRefreshTokenStore, RedisRefreshTokenStore>();
+        services.AddSingleton<IIdempotencyStore, RedisIdempotencyStore>();
+        services.AddSingleton<IDpopValidator, DpopValidator>();
         // Phase 2 — AGT layered shield: heuristic inner + AGT ML outer.
         // HeuristicPromptShield registered as concrete so AgtPromptShield can inject it.
         services.AddOptions<GovernancePolicyOptions>()
@@ -104,8 +149,11 @@ public static class DependencyInjection
         services.AddHostedService<TelegramBotService>();
 
         // Phase 10 — multi-channel gateway (Zalo, Slack, Email).
-        services.AddHttpClient("zalo");
-        services.AddHttpClient("slack");
+        // Channel HTTP clients: scoped timeout prevents indefinite hangs on Zalo/Slack API calls.
+        services.AddHttpClient("zalo",
+            c => c.Timeout = TimeSpan.FromSeconds(30));
+        services.AddHttpClient("slack",
+            c => c.Timeout = TimeSpan.FromSeconds(30));
         services.Configure<ZaloOptions>(cfg.GetSection(ZaloOptions.Section));
         services.Configure<SlackOptions>(cfg.GetSection(SlackOptions.Section));
         services.Configure<EmailOptions>(cfg.GetSection(EmailOptions.Section));
@@ -147,7 +195,9 @@ public static class DependencyInjection
         services.Configure<FineTuningOptions>(cfg.GetSection(FineTuningOptions.Section));
         services.AddScoped<IPreferenceStore, EfPreferenceStore>();
         services.AddScoped<IDpoExporter, EfDpoExporter>();
-        services.AddHttpClient("finetune");
+        // Fine-tune jobs can take several minutes to submit/poll; allow 5 min per call.
+        services.AddHttpClient("finetune",
+            c => c.Timeout = TimeSpan.FromMinutes(5));
         services.AddScoped<IFinetuneJobService, HttpFinetuneJobService>();
 
         // Phase 13 — operational maturity (kanban, clinical context, migration, diagnostics).
@@ -158,6 +208,31 @@ public static class DependencyInjection
         services.Configure<Hope.Agent.Application.Migration.MigrationOptions>(cfg.GetSection(Hope.Agent.Application.Migration.MigrationOptions.Section));
         services.AddScoped<Hope.Agent.Application.Migration.IExternalImporter, Hope.Agent.Infrastructure.Migration.ExternalChatbotImporter>();
         services.AddScoped<Hope.Agent.Application.Diagnostics.IDiagnosticRunner, Hope.Agent.Infrastructure.Diagnostics.DiagnosticRunner>();
+
+        // ── Global outbound TLS hardening ─────────────────────────────────────────
+        // Applied to EVERY named and typed HttpClient registered in this process:
+        //   • Minimum TLS 1.2 — blocks TLS 1.0/1.1 downgrade attacks.
+        //   • Certificate validation ON (default, made explicit via RemoteCertificateValidationCallback = null).
+        //   • ConnectTimeout 10 s — prevents thread exhaustion from stalled TCP connects.
+        //   • PooledConnectionLifetime 5 min — rotates connections so DNS / cert changes propagate.
+        // Individual LLM clients control their total request timeout through the Polly
+        // StandardResilienceHandler (AttemptTimeout 90 s, TotalRequestTimeout 120 s);
+        // channel clients use the explicit HttpClient.Timeout set above.
+        services.ConfigureHttpClientDefaults(b =>
+        {
+            b.ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+            {
+                SslOptions = new SslClientAuthenticationOptions
+                {
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    // RemoteCertificateValidationCallback = null means the default OS validator
+                    // runs — rejects expired, self-signed, and revoked certificates.
+                },
+                ConnectTimeout = TimeSpan.FromSeconds(10),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+            });
+            b.SetHandlerLifetime(TimeSpan.FromMinutes(5));
+        });
 
         return services;
     }

@@ -1,3 +1,4 @@
+using Hope.Agent.Api.Middleware;
 using Hope.Agent.Application.Context;
 using Hope.Agent.Application.Diagnostics;
 using Microsoft.AspNetCore.Builder;
@@ -10,7 +11,12 @@ public static class DiagnosticsEndpoints
 {
     public static IEndpointRouteBuilder MapDiagnosticsEndpoints(this IEndpointRouteBuilder app)
     {
-        var grp = app.MapGroup("/v1/diagnostics").RequireAuthorization().WithTags("Diagnostics");
+        var grp = app.MapGroup("/v1/diagnostics")
+            .RequireAuthorization()
+            .RequireRateLimiting("diagnostics")
+            .WithBodySizeLimit(32 * 1024)
+            .WithRequestValidation()
+            .WithTags("Diagnostics");
 
         grp.MapGet("", async (IDiagnosticRunner runner, CancellationToken ct) =>
         {

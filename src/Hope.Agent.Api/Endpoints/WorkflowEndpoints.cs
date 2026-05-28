@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Hope.Agent.Api.Middleware;
 using Hope.Agent.Application.Workflows;
 using Microsoft.AspNetCore.Mvc;
 
@@ -8,7 +9,12 @@ public static class WorkflowEndpoints
 {
     public static IEndpointRouteBuilder MapWorkflowEndpoints(this IEndpointRouteBuilder app)
     {
-        var grp = app.MapGroup("/v1/workflows").RequireAuthorization().WithTags("Workflows");
+        var grp = app.MapGroup("/v1/workflows")
+            .RequireAuthorization()
+            .WithTags("Workflows")
+            .WithBodySizeLimit(64 * 1024)
+            .WithRequestValidation()
+            .WithIdempotency();
 
         grp.MapPost("/admissions", async (
             [FromBody] StartAdmissionRequest req,

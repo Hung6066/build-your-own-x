@@ -27,6 +27,17 @@ public sealed class ToolApprovalOptions
     public int SandboxToolTimeoutMs { get; set; } = 30_000;
 
     /// <summary>
+    /// Max UTF-8 byte size allowed for tool input arguments JSON.
+    /// </summary>
+    public int SandboxMaxArgumentsBytes { get; set; } = 64 * 1024;
+
+    /// <summary>
+    /// Max UTF-8 byte size allowed for tool output returned to the orchestrator.
+    /// Oversized output is truncated to this boundary.
+    /// </summary>
+    public int SandboxMaxOutputBytes { get; set; } = 256 * 1024;
+
+    /// <summary>
     /// Per-tool impact mapping. Keys are tool names (case-insensitive).
     /// </summary>
     public Dictionary<string, ToolImpactLevel> Tools { get; set; } = new(StringComparer.OrdinalIgnoreCase);

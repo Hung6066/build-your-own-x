@@ -1,0 +1,48 @@
+name: codeql-analysis
+
+on:
+    push:
+        branches: ["main", "develop"]
+    pull_request:
+        branches: ["*"]
+    schedule:
+        - cron: "0 3 * * 1"
+    workflow_dispatch:
+
+permissions:
+    actions: read
+    contents: read
+    security-events: write
+
+jobs:
+    analyze:
+        name: Analyze (C#)
+        runs-on: ubuntu-latest
+
+        strategy:
+            fail-fast: false
+            matrix:
+                language: ["csharp"]
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+
+            - name: Initialize CodeQL
+              uses: github/codeql-action/init@v3
+              with:
+                  languages: ${{ matrix.language }}
+
+            - name: Setup .NET
+              uses: actions/setup-dotnet@v4
+              with:
+                  dotnet-version: "9.0.x"
+
+            - name: Restore
+              run: dotnet restore Hope.Agent.sln
+
+            - name: Build
+              run: dotnet build Hope.Agent.sln -c Release --nologo -v minimal
+
+            - name: Perform CodeQL analysis
+              uses: github/codeql-action/analyze@v3

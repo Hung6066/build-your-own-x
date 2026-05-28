@@ -33,6 +33,7 @@ public sealed class AnthropicProvider(HttpClient http, AnthropicOptions options)
         var usage = json.TryGetProperty("usage", out var u)
             ? new ChatUsage(u.GetProperty("input_tokens").GetInt32(), u.GetProperty("output_tokens").GetInt32(), u.GetProperty("input_tokens").GetInt32() + u.GetProperty("output_tokens").GetInt32())
             : new ChatUsage(0, 0, 0);
+        usage = usage with { CostUsd = (usage.PromptTokens * options.CostPer1KInputTokens + usage.CompletionTokens * options.CostPer1KOutputTokens) / 1000m };
         var stop = json.TryGetProperty("stop_reason", out var s) ? s.GetString() ?? "end_turn" : "end_turn";
         return new ChatResponse(content, toolCalls, stop, usage, Name, request.Model ?? options.Model);
     }
