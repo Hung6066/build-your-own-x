@@ -6,5 +6,5 @@ public sealed class TemporalOptions
     public string TargetHost { get; set; } = "localhost:7233";
     public string Namespace { get; set; } = "default";
     public string TaskQueue { get; set; } = "hope-agent-clinical";
-    public bool EnableWorker { get; set; } = true;
+    public bool EnableWorker { get; set; }
 }

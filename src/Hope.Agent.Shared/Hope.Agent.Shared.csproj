@@ -1,2 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Suppress analyzer warnings for intentional design patterns -->
+    <!-- CA1716: Reserved keyword 'Error' and namespace 'Shared' -->
+    <!-- CA1000: Static members on generic type Result<T> -->
+    <NoWarn>$(NoWarn);CA1716;CA1000</NoWarn>
+  </PropertyGroup>
 </Project>

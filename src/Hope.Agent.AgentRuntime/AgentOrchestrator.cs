@@ -7,6 +7,7 @@ using Hope.Agent.Application.Context;
 using Hope.Agent.Application.Knowledge;
 using Hope.Agent.Application.LLM;
 using Hope.Agent.Application.Learning;
+using Hope.Agent.Application.Memory;
 using Hope.Agent.Application.Observability;
 using Hope.Agent.Application.Security;
 using Hope.Agent.Application.Tools;
@@ -32,6 +33,14 @@ public sealed class AgentRuntimeOptions
     public int SkillTopK { get; set; } = 3;
     public bool EnableKnowledgeGraph { get; set; } = true;
     public bool EnableShadowAB { get; set; } = true;
+    /// <summary>Use hybrid dense+sparse (RRF) memory retrieval instead of dense-only. Default on.</summary>
+    public bool EnableHybridRetrieval { get; set; } = true;
+    /// <summary>Run an LLM reranker over retrieved memory candidates before injecting them. Default off (extra LLM call).</summary>
+    public bool EnableMemoryReranking { get; set; }
+    /// <summary>Candidates to fetch before reranking down to <see cref="MemoryTopK"/>.</summary>
+    public int RerankCandidateK { get; set; } = 12;
+    /// <summary>Use Mem0/A-Mem consolidation (fact extraction + ADD/UPDATE/DELETE) instead of raw episodic dumps. Default on.</summary>
+    public bool EnableMemoryConsolidation { get; set; } = true;
     public string SystemPrompt { get; set; } =
         "You are Hope, a careful clinical operations AI for a Vietnamese healthcare provider. " +
         "Always cite which tool you used. Refuse to fabricate clinical data. " +
@@ -66,7 +75,9 @@ internal sealed class AgentOrchestrator(
     IClock clock,
     IOptions<AgentRuntimeOptions> opts,
     ILogger<AgentOrchestrator> log,
-    IClinicalContextProvider? clinicalContext = null) : IAgentRuntime
+    IClinicalContextProvider? clinicalContext = null,
+    IMemoryConsolidator? consolidator = null,
+    IMemoryReranker? reranker = null) : IAgentRuntime
 {
     private static readonly ActivitySource Activity = new("Hope.Agent.Runtime");
     private readonly AgentRuntimeOptions _opts = opts.Value;
@@ -171,7 +182,7 @@ internal sealed class AgentOrchestrator(
         }
 
         await convRepo.SaveChangesAsync(ct);
-        await StoreEpisodicAsync(request, conv, finalContent, ct);
+        await PersistMemoryAsync(request, conv, finalContent, ct);
 
         var convIdForExtract = conv.Id;
         var userIdForExtract = request.UserId;
@@ -307,9 +318,26 @@ internal sealed class AgentOrchestrator(
         {
             var embedder = router.SelectEmbedding();
             var embed = await embedder.EmbedAsync(new EmbeddingRequest([request.Message]), ct);
-            var hits = await memory.SearchAsync(request.UserId, embed.Vectors[0], _opts.MemoryTopK, kind: null, ct);
+
+            // Fetch more candidates when reranking is enabled so the reranker has room to reorder.
+            var fetchK = _opts.EnableMemoryReranking ? Math.Max(_opts.RerankCandidateK, _opts.MemoryTopK) : _opts.MemoryTopK;
+
+            var hits = _opts.EnableHybridRetrieval
+                ? await memory.SearchHybridAsync(request.UserId, embed.Vectors[0], request.Message, fetchK, kind: null, ct)
+                : await memory.SearchAsync(request.UserId, embed.Vectors[0], fetchK, kind: null, ct);
+
             // ── NeMo Guardrails retrieval rail: drop chunks containing injection patterns ──
-            return retrievalRail.Filter(hits);
+            hits = retrievalRail.Filter(hits);
+
+            if (_opts.EnableMemoryReranking && reranker is not null && hits.Count > _opts.MemoryTopK)
+            {
+                hits = await reranker.RerankAsync(request.Message, hits, _opts.MemoryTopK, ct);
+            }
+            else if (hits.Count > _opts.MemoryTopK)
+            {
+                hits = hits.Take(_opts.MemoryTopK).ToList();
+            }
+            return hits;
         }
         catch (Exception ex)
         {
@@ -457,6 +485,23 @@ internal sealed class AgentOrchestrator(
             new("tool", output, call.Name, call.Id),
         };
         return copy;
+    }
+
+    /// <summary>
+    /// Routes the finished turn to the SOTA consolidation pipeline (Mem0/A-Mem: fact extraction +
+    /// ADD/UPDATE/DELETE reconciliation + graph linking) when enabled, otherwise falls back to the
+    /// legacy raw episodic dump. Consolidation supersedes raw dumps to keep memory dense and current.
+    /// </summary>
+    private async Task PersistMemoryAsync(AgentRequest request, Conversation conv, string finalContent, CancellationToken ct)
+    {
+        if (_opts.EnableMemoryConsolidation && consolidator is not null)
+        {
+            await consolidator.ConsolidateAsync(
+                new MemoryConsolidationContext(request.UserId, conv.Id, request.Message, finalContent, request.AgentProfile),
+                ct);
+            return;
+        }
+        await StoreEpisodicAsync(request, conv, finalContent, ct);
     }
 
     private async Task StoreEpisodicAsync(AgentRequest request, Conversation conv, string finalContent, CancellationToken ct)

@@ -3,6 +3,8 @@ using Hope.Agent.Workflows.Activities;
 using Hope.Agent.Workflows.WorkflowsImpl;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Temporalio.Client;
 using Temporalio.Extensions.Hosting;
 
 namespace Hope.Agent.Workflows;
@@ -15,7 +17,24 @@ public static class DependencyInjection
         var options = section.Get<TemporalOptions>() ?? new TemporalOptions();
         services.AddSingleton(options);
 
-        services.AddTemporalClient(clientTargetHost: options.TargetHost, clientNamespace: options.Namespace);
+        // Register ITemporalClient lazily so a missing Temporal server does not crash startup.
+        // ConnectAsync is deferred to first resolution; if it fails, startup still succeeds.
+        services.AddSingleton<ITemporalClient>(sp =>
+        {
+            var log = sp.GetRequiredService<ILogger<TemporalWorkflowDispatcher>>();
+            try
+            {
+                return TemporalClient.ConnectAsync(new TemporalClientConnectOptions(options.TargetHost)
+                {
+                    Namespace = options.Namespace,
+                }).GetAwaiter().GetResult();
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Temporal server unavailable at {Host}; workflow dispatch will be degraded until reconnected.", options.TargetHost);
+                throw; // let callers handle unavailability; do not swallow so IWorkflowDispatcher can 503
+            }
+        });
 
         services.AddScoped<IWorkflowDispatcher, TemporalWorkflowDispatcher>();
 

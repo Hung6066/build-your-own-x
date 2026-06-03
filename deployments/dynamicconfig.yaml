@@ -1,0 +1,2 @@
+# Minimal dynamic configuration for Temporal
+# This file is mounted into the Temporal container to satisfy the dynamic config requirement

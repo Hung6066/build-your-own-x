@@ -5,15 +5,27 @@ using Qdrant.Client.Grpc;
 
 namespace Hope.Agent.Infrastructure.Memory;
 
-public sealed class QdrantMemoryStore(QdrantClient client, QdrantOptions options) : IMemoryStore
+public sealed class QdrantMemoryStore(QdrantClient client, QdrantOptions options, ISparseEncoder sparse) : IMemoryStore
 {
+    private const string DenseVector = "dense";
+    private const string SparseVector = "sparse";
+    private static readonly WithPayloadSelector WithPayload = new() { Enable = true };
+
     public async Task UpsertAsync(MemoryRecord record, ReadOnlyMemory<float> embedding, CancellationToken ct)
     {
         await EnsureCollectionAsync(embedding.Length, ct);
+        var named = new NamedVectors();
+        named.Vectors[DenseVector] = embedding.ToArray();
+        var sp = sparse.Encode(record.Content);
+        if (!sp.IsEmpty)
+        {
+            Vector sparseVec = (sp.Values, sp.Indices);
+            named.Vectors[SparseVector] = sparseVec;
+        }
         var point = new PointStruct
         {
             Id = new PointId { Uuid = record.Id.ToString() },
-            Vectors = embedding.ToArray(),
+            Vectors = new Vectors { Vectors_ = named },
         };
         point.Payload["user_id"] = record.UserId.ToString();
         point.Payload["conversation_id"] = record.ConversationId?.ToString() ?? string.Empty;
@@ -28,41 +40,70 @@ public sealed class QdrantMemoryStore(QdrantClient client, QdrantOptions options
     }
 
     /// <summary>
-    /// Retrieves the top-K memories for a user, re-ranked by an effective score that combines
-    /// raw cosine similarity, stored importance, and recency decay (90-day half-life).
+    /// Retrieves the top-K memories for a user via dense (semantic) search, re-ranked by an effective
+    /// score that combines raw cosine similarity, stored importance, and recency decay (90-day half-life).
     /// Fetches <c>topK * 3</c> raw candidates from Qdrant to allow meaningful re-ordering.
     /// </summary>
     public async Task<IReadOnlyList<MemorySearchHit>> SearchAsync(Guid userId, ReadOnlyMemory<float> query, int topK, MemoryKind? kind, CancellationToken ct)
     {
         var filter = BuildUserFilter(userId, kind);
         var candidateLimit = (ulong)Math.Max(topK * 3, 15);
-        var results = await client.SearchAsync(options.Collection, query.ToArray(), filter, limit: candidateLimit, cancellationToken: ct);
-        var now = DateTimeOffset.UtcNow;
-        return results
-            .Select(r => (Hit: MapToHit(r, userId), Raw: r))
-            .Select(x =>
-            {
-                var daysSince = Math.Max(0.0, (now - x.Hit.Record.CreatedAt).TotalDays);
-                var decay = (float)Math.Exp(-daysSince / 90.0);
-                // Weight importance [0,1] → [0.4, 1.0] so low-importance memories still surface
-                var importanceWeight = 0.4f + 0.6f * x.Hit.Record.Importance;
-                return new MemorySearchHit(x.Hit.Record, x.Raw.Score * importanceWeight * decay);
-            })
-            .OrderByDescending(h => h.Score)
-            .Take(topK)
-            .ToList();
+        var results = await client.QueryAsync(
+            options.Collection,
+            query: new Query { Nearest = query.ToArray() },
+            usingVector: DenseVector,
+            filter: filter,
+            limit: candidateLimit,
+            payloadSelector: WithPayload,
+            cancellationToken: ct);
+        return ReRank(results, userId, topK);
+    }
+
+    /// <summary>
+    /// Hybrid dense + sparse retrieval fused with Reciprocal Rank Fusion on the Qdrant server, then
+    /// re-ranked by importance × recency decay. When the query has no usable lexical terms it degrades
+    /// gracefully to a dense-only prefetch.
+    /// </summary>
+    public async Task<IReadOnlyList<MemorySearchHit>> SearchHybridAsync(Guid userId, ReadOnlyMemory<float> dense, string queryText, int topK, MemoryKind? kind, CancellationToken ct)
+    {
+        var filter = BuildUserFilter(userId, kind);
+        var candidateLimit = (ulong)Math.Max(topK * 4, 20);
+        var prefetch = new List<PrefetchQuery>
+        {
+            new() { Query = new Query { Nearest = dense.ToArray() }, Using = DenseVector, Limit = candidateLimit, Filter = filter },
+        };
+        var sp = sparse.Encode(queryText);
+        if (!sp.IsEmpty)
+        {
+            VectorInput sparseInput = (sp.Values, sp.Indices);
+            prefetch.Add(new PrefetchQuery { Query = new Query { Nearest = sparseInput }, Using = SparseVector, Limit = candidateLimit, Filter = filter });
+        }
+        var results = await client.QueryAsync(
+            options.Collection,
+            query: new Query { Fusion = Fusion.Rrf },
+            prefetch: prefetch,
+            limit: candidateLimit,
+            payloadSelector: WithPayload,
+            cancellationToken: ct);
+        return ReRank(results, userId, topK);
     }
 
     /// <summary>
     /// Returns up to 1 memory whose raw cosine similarity exceeds <paramref name="threshold"/>.
-    /// Uses Qdrant-side score threshold to avoid transferring irrelevant candidates.
+    /// Uses a Qdrant-side score threshold to avoid transferring irrelevant candidates.
     /// </summary>
     public async Task<IReadOnlyList<MemorySearchHit>> FindSimilarAsync(Guid userId, ReadOnlyMemory<float> query, float threshold, CancellationToken ct)
     {
         var filter = BuildUserFilter(userId, kind: null);
-        var results = await client.SearchAsync(
-            options.Collection, query.ToArray(), filter,
-            limit: 1, scoreThreshold: threshold, cancellationToken: ct);
+        var results = await client.QueryAsync(
+            options.Collection,
+            query: new Query { Nearest = query.ToArray() },
+            usingVector: DenseVector,
+            filter: filter,
+            scoreThreshold: threshold,
+            limit: 1,
+            payloadSelector: WithPayload,
+            cancellationToken: ct);
         return results.Select(r => MapToHit(r, userId)).ToList();
     }
 
@@ -80,6 +121,27 @@ public sealed class QdrantMemoryStore(QdrantClient client, QdrantOptions options
             new Dictionary<string, Value> { ["importance"] = (double)updated },
             memoryId,
             cancellationToken: ct);
+    }
+
+    public async Task DeleteAsync(Guid memoryId, CancellationToken ct) =>
+        await client.DeleteAsync(options.Collection, memoryId, cancellationToken: ct);
+
+    private static IReadOnlyList<MemorySearchHit> ReRank(IReadOnlyList<ScoredPoint> results, Guid userId, int topK)
+    {
+        var now = DateTimeOffset.UtcNow;
+        return results
+            .Select(r => (Hit: MapToHit(r, userId), Raw: r))
+            .Select(x =>
+            {
+                var daysSince = Math.Max(0.0, (now - x.Hit.Record.CreatedAt).TotalDays);
+                var decay = (float)Math.Exp(-daysSince / 90.0);
+                // Weight importance [0,1] → [0.4, 1.0] so low-importance memories still surface
+                var importanceWeight = 0.4f + 0.6f * x.Hit.Record.Importance;
+                return new MemorySearchHit(x.Hit.Record, x.Raw.Score * importanceWeight * decay);
+            })
+            .OrderByDescending(h => h.Score)
+            .Take(topK)
+            .ToList();
     }
 
     private static Filter BuildUserFilter(Guid userId, MemoryKind? kind)
@@ -116,11 +178,26 @@ public sealed class QdrantMemoryStore(QdrantClient client, QdrantOptions options
     {
         var exists = await client.CollectionExistsAsync(options.Collection, ct);
         if (exists) return;
-        await client.CreateCollectionAsync(options.Collection, new VectorParams
+
+        var vectorsConfig = new VectorParamsMap();
+        vectorsConfig.Map[DenseVector] = new VectorParams
         {
             Size = (ulong)dim,
             Distance = Distance.Cosine,
-        }, cancellationToken: ct);
+        };
+        var sparseConfig = new SparseVectorConfig();
+        sparseConfig.Map[SparseVector] = new SparseVectorParams();
+        // int8 scalar quantization: ~4× smaller vectors, kept in RAM for fast rescoring.
+        var quantization = new QuantizationConfig
+        {
+            Scalar = new ScalarQuantization { Type = QuantizationType.Int8, AlwaysRam = true },
+        };
+        await client.CreateCollectionAsync(
+            options.Collection,
+            vectorsConfig: vectorsConfig,
+            quantizationConfig: quantization,
+            sparseVectorsConfig: sparseConfig,
+            cancellationToken: ct);
     }
 }
 
@@ -128,6 +205,6 @@ public sealed class QdrantOptions
 {
     public string Host { get; set; } = "localhost";
     public int Port { get; set; } = 6334;
-    public string Collection { get; set; } = "agent_memory";
+    public string Collection { get; set; } = "agent_memory_v2";
     public string? ApiKey { get; set; }
 }

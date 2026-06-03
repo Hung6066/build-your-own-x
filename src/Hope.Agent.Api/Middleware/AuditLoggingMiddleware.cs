@@ -8,7 +8,7 @@ namespace Hope.Agent.Api.Middleware;
 
 internal sealed class AuditLoggingMiddleware(
     RequestDelegate next,
-    IAuditSink auditSink,
+    IServiceScopeFactory scopeFactory,
     IPhiRedactor phiRedactor,
     IWebHostEnvironment env,
     ILogger<AuditLoggingMiddleware> log)
@@ -68,6 +68,8 @@ internal sealed class AuditLoggingMiddleware(
 
             try
             {
+                await using var scope = scopeFactory.CreateAsyncScope();
+                var auditSink = scope.ServiceProvider.GetRequiredService<IAuditSink>();
                 await auditSink.WriteAsync(evt, ctx.RequestAborted);
             }
             catch (OperationCanceledException) when (ctx.RequestAborted.IsCancellationRequested)

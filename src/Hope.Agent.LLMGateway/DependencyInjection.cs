@@ -22,6 +22,8 @@ public static class DependencyInjection
     {
         var options = cfg.GetSection("LLM").Get<LLMOptions>() ?? new LLMOptions();
         services.AddSingleton(options);
+        services.AddSingleton(options.Anthropic);
+        services.AddSingleton(options.Gemini);
 
         AddOpenAICompat(services, "openai", options.OpenAI, isEmbedding: true);
         AddOpenAICompat(services, "qwen", options.Qwen, isEmbedding: true);
@@ -79,6 +81,8 @@ public static class DependencyInjection
         opts.Retry.MaxRetryAttempts = 2;
         opts.Retry.BackoffType = DelayBackoffType.Exponential;
         opts.AttemptTimeout.Timeout = TimeSpan.FromSeconds(90);
-        opts.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(120);
+        opts.TotalRequestTimeout.Timeout = TimeSpan.FromSeconds(300);
+        // Polly requires SamplingDuration >= 2 × AttemptTimeout (90 s × 2 = 180 s minimum)
+        opts.CircuitBreaker.SamplingDuration = TimeSpan.FromSeconds(180);
     }
 }

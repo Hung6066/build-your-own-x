@@ -1,0 +1,94 @@
+# Docker build context exclusions
+
+# Git
+.git
+.gitignore
+.gitattributes
+
+# IDE/Editor
+.vscode
+.vs
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+*.sublime-*
+.editorconfig
+
+# Build outputs
+bin/
+obj/
+dist/
+build/
+*.nupkg
+*.snupkg
+
+# Test results
+TestResults/
+*.trx
+coverage/
+.coverage
+
+# Node (if using npm in frontend)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Package managers
+nuget.config
+packages.config
+
+# Documentation
+docs/
+README.md
+LICENSE
+CHANGELOG.md
+CONTRIBUTING.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+azure-pipelines.yml
+Jenkinsfile
+
+# Docker
+docker-compose*.yml
+docker-compose*.yaml
+.dockerignore
+Dockerfile*
+
+# Kubernetes
+k8s/
+helm/
+*.yaml
+*.yml
+
+# Environment files
+.env*
+.env.*.local
+secrets/
+
+# Logs
+logs/
+*.log
+
+# OS files
+Thumbs.db
+*.exe
+
+# Archives (save bandwidth)
+*.tar
+*.tar.gz
+*.zip
+*.rar
+
+# Cache
+.cache/
+.pytest_cache/
+
+# Temporary
+tmp/
+temp/
+*.tmp

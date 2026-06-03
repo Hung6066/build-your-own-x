@@ -1,4 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Suppress analyzer warnings for performance suggestions -->
+    <!-- CA1848: Use logger method extensions (LoggerMessage pattern optimization) -->
+    <!-- CA1725: Parameter name should match base declaration -->
+    <NoWarn>$(NoWarn);CA1848;CA1725</NoWarn>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Hope.Agent.Application\Hope.Agent.Application.csproj" />
   </ItemGroup>

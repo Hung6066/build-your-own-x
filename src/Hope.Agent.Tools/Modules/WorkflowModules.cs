@@ -18,10 +18,10 @@ internal sealed class CoreToolModule : IWorkflowModule
 
     public void RegisterServices(IServiceCollection services)
     {
-        services.AddScoped<IAgentTool, PatientLookupTool>();
-        services.AddScoped<IAgentTool, AppointmentScheduleTool>();
-        services.AddScoped<IAgentTool, InsuranceVerifyTool>();
-        services.AddScoped<IAgentTool, ClinicalGuidelineSearchTool>();
+        services.AddSingleton<IAgentTool, PatientLookupTool>();
+        services.AddSingleton<IAgentTool, AppointmentScheduleTool>();
+        services.AddSingleton<IAgentTool, InsuranceVerifyTool>();
+        services.AddSingleton<IAgentTool, ClinicalGuidelineSearchTool>();
     }
 }
 
@@ -36,9 +36,9 @@ internal sealed class AppointmentSchedulingToolModule : IWorkflowModule
 
     public void RegisterServices(IServiceCollection services)
     {
-        services.AddScoped<IAgentTool, MapSpecialtyTool>();
-        services.AddScoped<IAgentTool, GetDoctorSlotsTool>();
-        services.AddScoped<IAgentTool, CommitBookingTool>();
+        services.AddSingleton<IAgentTool, MapSpecialtyTool>();
+        services.AddSingleton<IAgentTool, GetDoctorSlotsTool>();
+        services.AddSingleton<IAgentTool, CommitBookingTool>();
     }
 }
 
@@ -53,7 +53,7 @@ internal sealed class MedicationReminderToolModule : IWorkflowModule
 
     public void RegisterServices(IServiceCollection services)
     {
-        services.AddScoped<IAgentTool, GetMedicationScheduleTool>();
+        services.AddSingleton<IAgentTool, GetMedicationScheduleTool>();
     }
 }
 
@@ -68,9 +68,9 @@ internal sealed class AuditReportToolModule : IWorkflowModule
 
     public void RegisterServices(IServiceCollection services)
     {
-        services.AddScoped<IAgentTool, CollectAuditLogsTool>();
-        services.AddScoped<IAgentTool, DetectAuditAnomaliesTool>();
-        services.AddScoped<IAgentTool, ExportAuditReportTool>();
+        services.AddSingleton<IAgentTool, CollectAuditLogsTool>();
+        services.AddSingleton<IAgentTool, DetectAuditAnomaliesTool>();
+        services.AddSingleton<IAgentTool, ExportAuditReportTool>();
     }
 }
 
@@ -89,8 +89,8 @@ internal sealed class OptimizationToolModule : IWorkflowModule
 
     public void RegisterServices(IServiceCollection services)
     {
-        services.AddScoped<IAgentTool, OptimizeBatchAppointmentsTool>();
-        services.AddScoped<IAgentTool, RankTriagePatientsTool>();
-        services.AddScoped<IAgentTool, ThrottleNotificationsTool>();
+        services.AddSingleton<IAgentTool, OptimizeBatchAppointmentsTool>();
+        services.AddSingleton<IAgentTool, RankTriagePatientsTool>();
+        services.AddSingleton<IAgentTool, ThrottleNotificationsTool>();
     }
 }

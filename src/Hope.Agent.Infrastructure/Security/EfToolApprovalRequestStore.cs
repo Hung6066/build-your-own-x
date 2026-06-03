@@ -23,9 +23,9 @@ internal sealed class EfToolApprovalRequestStore(AgentDbContext db) : IToolAppro
             .Take(take)
             .ToListAsync(ct);
 
-    public async Task<IReadOnlyList<ToolApprovalRequest>> QueryAsync(DateTimeOffset from, DateTimeOffset to, int take, CancellationToken ct) =>
+    public async Task<IReadOnlyList<ToolApprovalRequest>> QueryAsync(DateTimeOffset from, DateTimeOffset until, int take, CancellationToken ct) =>
         await db.ToolApprovalRequests.AsNoTracking()
-            .Where(x => x.RequestedAt >= from && x.RequestedAt <= to)
+            .Where(x => x.RequestedAt >= from && x.RequestedAt <= until)
             .OrderByDescending(x => x.RequestedAt)
             .Take(take)
             .ToListAsync(ct);

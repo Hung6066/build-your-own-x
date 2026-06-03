@@ -17,7 +17,9 @@ public sealed class KafkaEventPublisher : IEventPublisher, IAsyncDisposable
             CompressionType = CompressionType.Zstd,
             LingerMs = 5,
         };
-        _producer = new ProducerBuilder<string, string>(config).Build();
+        _producer = new ProducerBuilder<string, string>(config)
+            .SetLogHandler((_, _) => { })
+            .Build();
     }
 
     public async Task PublishAsync(string topic, string key, string payloadJson, CancellationToken ct)

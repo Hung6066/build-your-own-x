@@ -1,10 +1,24 @@
 FROM mcr.microsoft.com/dotnet/sdk:9.0 AS build
 WORKDIR /src
+
+# Copy configuration files
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
+
 ARG PROJECT
+
+# Restore dependencies
 RUN dotnet restore "src/${PROJECT}/${PROJECT}.csproj"
-RUN dotnet publish "src/${PROJECT}/${PROJECT}.csproj" -c Release -o /app --no-restore /p:UseAppHost=false
+
+# Publish
+RUN dotnet publish "src/${PROJECT}/${PROJECT}.csproj" \
+    -c Release \
+    -o /app \
+    --no-restore \
+    /p:UseAppHost=false \
+    /p:DebugType=none \
+    /p:DebugSymbols=false \
+    /p:TreatWarningsAsErrors=false
 
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS runtime
 WORKDIR /app

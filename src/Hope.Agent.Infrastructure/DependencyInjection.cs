@@ -8,6 +8,7 @@ using Hope.Agent.Application.Insights;
 using Hope.Agent.Application.Knowledge;
 using Hope.Agent.Application.Learning;
 using Hope.Agent.Application.Governance;
+using Hope.Agent.Application.Memory;
 using Hope.Agent.Application.Personalization;
 using Hope.Agent.Application.Rag;
 using Hope.Agent.Application.Security;
@@ -23,6 +24,7 @@ using Hope.Agent.Infrastructure.Channels.Zalo;
 using Hope.Agent.Infrastructure.Insights;
 using Hope.Agent.Infrastructure.Knowledge;
 using Hope.Agent.Infrastructure.Learning;
+using Hope.Agent.Infrastructure.Maintenance;
 using Hope.Agent.Infrastructure.Memory;
 using Hope.Agent.Infrastructure.Messaging;
 using Hope.Agent.Infrastructure.Personalization;
@@ -71,11 +73,11 @@ public static class DependencyInjection
         {
             var redisConn = cfg.GetConnectionString("Redis") ?? "localhost:6379";
             var options = ConfigurationOptions.Parse(redisConn);
+            options.AbortOnConnectFail = false;
             if (!isDevelopment)
             {
                 options.Ssl = true;
                 options.SslProtocols = System.Security.Authentication.SslProtocols.Tls12 | System.Security.Authentication.SslProtocols.Tls13;
-                options.AbortOnConnectFail = false;
             }
 
             return ConnectionMultiplexer.Connect(options);
@@ -100,9 +102,16 @@ public static class DependencyInjection
 
         services.AddSingleton(qdrant);
         services.AddSingleton(_ => new QdrantClient(qdrant.Host, qdrant.Port, apiKey: qdrant.ApiKey));
+        services.AddSingleton<ISparseEncoder, Bm25SparseEncoder>();
         services.AddSingleton<IMemoryStore, QdrantMemoryStore>();
         services.AddSingleton<IVectorIndex, QdrantVectorIndex>();
         services.AddScoped<IDocumentStore, EfDocumentStore>();
+
+        // SOTA memory pipeline: Mem0/A-Mem consolidation + LLM reranking + periodic forgetting.
+        services.AddScoped<IMemoryConsolidator, LlmMemoryConsolidator>();
+        services.AddScoped<IMemoryReranker, LlmMemoryReranker>();
+        services.Configure<MemoryMaintenanceOptions>(cfg.GetSection(MemoryMaintenanceOptions.Section));
+        services.AddHostedService<MemoryMaintenanceHostedService>();
 
         var kafka = cfg.GetSection("Kafka").Get<KafkaOptions>() ?? new KafkaOptions();
         services.AddSingleton(kafka);

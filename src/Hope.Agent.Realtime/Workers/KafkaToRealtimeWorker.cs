@@ -27,28 +27,39 @@ internal sealed class KafkaToRealtimeWorker(
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         log.LogInformation("Kafka→Realtime worker started, topics={Topics}", string.Join(',', Topics));
-        try
+        var delay = TimeSpan.FromSeconds(5);
+        while (!stoppingToken.IsCancellationRequested)
         {
-            await foreach (var env in consumer.ConsumeAsync(Topics, "realtime-fanout", stoppingToken))
+            try
             {
-                try
+                await foreach (var env in consumer.ConsumeAsync(Topics, "realtime-fanout", stoppingToken))
                 {
-                    await using var scope = scopes.CreateAsyncScope();
-                    var notifier = scope.ServiceProvider.GetRequiredService<IRealtimeNotifier>();
-                    var notification = env.Topic == "agent.notifications"
-                        ? JsonSerializer.Deserialize<AgentNotification>(env.PayloadJson)
-                        : ToSyntheticNotification(env);
-                    if (notification is null) continue;
-                    if (notification.UserId is { } uid) await notifier.SendToUserAsync(uid, notification, stoppingToken);
-                    else await notifier.BroadcastAsync(notification, stoppingToken);
+                    try
+                    {
+                        await using var scope = scopes.CreateAsyncScope();
+                        var notifier = scope.ServiceProvider.GetRequiredService<IRealtimeNotifier>();
+                        var notification = env.Topic == "agent.notifications"
+                            ? JsonSerializer.Deserialize<AgentNotification>(env.PayloadJson)
+                            : ToSyntheticNotification(env);
+                        if (notification is null) continue;
+                        if (notification.UserId is { } uid) await notifier.SendToUserAsync(uid, notification, stoppingToken);
+                        else await notifier.BroadcastAsync(notification, stoppingToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        log.LogError(ex, "Failed to relay event {Topic} key={Key}", env.Topic, env.Key);
+                    }
                 }
-                catch (Exception ex)
-                {
-                    log.LogError(ex, "Failed to relay event {Topic} key={Key}", env.Topic, env.Key);
-                }
+                delay = TimeSpan.FromSeconds(5); // reset on clean exit
+            }
+            catch (OperationCanceledException) { break; }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Kafka→Realtime worker connection failed; retrying in {Delay}s", delay.TotalSeconds);
+                try { await Task.Delay(delay, stoppingToken); } catch (OperationCanceledException) { break; }
+                delay = TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds * 2, 120));
             }
         }
-        catch (OperationCanceledException) { /* shutdown */ }
     }
 
     private static AgentNotification ToSyntheticNotification(EventEnvelope env) => new(

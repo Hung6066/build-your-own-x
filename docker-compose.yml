@@ -1,0 +1,265 @@
+services:
+  # ──────────────────────────────────────────────────────────────────────────
+  # PostgreSQL: Primary database for conversations, users, audit logs
+  # ──────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: hope-agent-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-hope_agent}
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_INITDB_ARGS: "-c log_statement=all"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deployments/temporal-init.sh:/docker-entrypoint-initdb.d/01-temporal-init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hope-agent-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Redis: Distributed cache, refresh tokens, session data, idempotency keys
+  # ──────────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: hope-agent-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis123}
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hope-agent-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Zookeeper: Kafka coordination
+  # ──────────────────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.7.0
+    container_name: hope-agent-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_SYNC_LIMIT: 2
+      ZOOKEEPER_INIT_LIMIT: 5
+    ports:
+      - "2181:2181"
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hope-agent-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Kafka: Event streaming (agent.notifications, agent.task.*, agent.role.*)
+  # ──────────────────────────────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.7.0
+    container_name: hope-agent-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 72
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hope-agent-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Temporal Server: Durable workflow orchestration (patient admission, triage, etc.)
+  # ──────────────────────────────────────────────────────────────────────────
+  temporal:
+    image: temporalio/server:${TEMPORAL_VERSION:-latest}
+    container_name: hope-agent-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      DB_NAME: temporal
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PWD: ${DB_PASSWORD:-postgres}
+      POSTGRES_SEEDS: postgres
+      TEMPORAL_METRICS_PROMETHEUS_FRAMEWORK_NAME: temporal
+    ports:
+      - "7233:7233"  # gRPC frontend
+      - "6933:6933"  # Metrics
+    volumes:
+      - temporal_data:/var/lib/temporal
+      - ./deployments/dynamicconfig.yaml:/etc/temporal/config/dynamicconfig/docker.yaml:ro
+    healthcheck:
+      test: ["CMD", "bash", "-c", "tctl admin cluster health | grep -q 'Cluster status: UP'"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - hope-agent-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Temporal UI: Web interface for monitoring workflows
+  # ──────────────────────────────────────────────────────────────────────────
+  temporal-ui:
+    image: temporalio/ui:${TEMPORAL_VERSION:-latest}
+    container_name: hope-agent-temporal-ui
+    depends_on:
+      - temporal
+    ports:
+      - "8081:8080"
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hope-agent-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Qdrant: Vector database for embeddings (RAG, semantic search)
+  # ──────────────────────────────────────────────────────────────────────────
+  qdrant:
+    image: qdrant/qdrant:${QDRANT_VERSION:-latest}
+    container_name: hope-agent-qdrant
+    ports:
+      - "6333:6333"  # REST API
+      - "6334:6334"  # gRPC
+    environment:
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-qdrant123}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/livez"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - hope-agent-net
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Hope.Agent API: Main .NET 9 healthcare AI service
+  # ──────────────────────────────────────────────────────────────────────────
+  hope-agent-api:
+    build:
+      context: .
+      dockerfile: deployments/Dockerfile
+      args:
+        PROJECT: Hope.Agent.Api
+    container_name: hope-agent-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
+      ASPNETCORE_URLS: http://+:8080
+      
+      # Database
+      CONNECTIONSTRINGS__DEFAULT: "Server=postgres;Port=5432;Database=${DB_NAME:-hope_agent};User Id=${DB_USER:-postgres};Password=${DB_PASSWORD:-postgres};Application Name=Hope.Agent"
+      CONNECTIONSTRINGS__REDIS: "redis:6379,password=${REDIS_PASSWORD:-redis123},abortConnect=false"
+      
+      # LLM Providers
+      LLM__OPENAI__APIKEY: ${OPENAI_API_KEY:-}
+      LLM__OPENAI__MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      LLM__OPENAI__COSTPER1KINPUTTOKENS: ${OPENAI_COST_INPUT:-0.00015}
+      LLM__OPENAI__COSTPER1KOUTPUTTOKENS: ${OPENAI_COST_OUTPUT:-0.00060}
+      
+      LLM__ANTHROPIC__APIKEY: ${ANTHROPIC_API_KEY:-}
+      LLM__ANTHROPIC__MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}
+      LLM__ANTHROPIC__COSTPER1KINPUTTOKENS: ${ANTHROPIC_COST_INPUT:-0.003}
+      LLM__ANTHROPIC__COSTPER1KOUTPUTTOKENS: ${ANTHROPIC_COST_OUTPUT:-0.015}
+      
+      LLM__GEMINI__APIKEY: ${GEMINI_API_KEY:-}
+      LLM__GEMINI__MODEL: ${GEMINI_MODEL:-gemini-2.0-flash}
+      LLM__GEMINI__COSTPER1KINPUTTOKENS: ${GEMINI_COST_INPUT:-0.0001}
+      LLM__GEMINI__COSTPER1KOUTPUTTOKENS: ${GEMINI_COST_OUTPUT:-0.0004}
+      
+      # Kafka
+      KAFKA__BOOTSTRAPSERVERS: kafka:29092
+      
+      # Temporal
+      TEMPORAL__TARGETHOST: temporal:7233
+      TEMPORAL__ENABLEWORKER: "false"  # false in docker-compose; enable only in production
+      
+      # Qdrant
+      QDRANT__URL: http://qdrant:6333
+      QDRANT__APIKEY: ${QDRANT_API_KEY:-qdrant123}
+      
+      # Security & Observability
+      ASPNETCORE_ENABLEHEALTH: "true"
+      OTEL_ENABLED: "false"  # disable OpenTelemetry in dev
+      
+      # App Settings
+      AGENTRUNTIME__ENABLEREFLECTION: "true"
+      AGENTRUNTIME__ENABLEADAPTIVEROUTING: "true"
+      AGENTRUNTIME__ENABLEKNOWLEDGEGRAPH: "true"
+      AGENTRUNTIME__ENABLESHADOWAB: "false"
+    volumes:
+      - ./src:/src
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - hope-agent-net
+    labels:
+      - "com.example.description=Hope.Agent Healthcare AI Service"
+
+networks:
+  hope-agent-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  zookeeper_data:
+    driver: local
+  kafka_data:
+    driver: local
+  temporal_data:
+    driver: local
+  qdrant_data:
+    driver: local

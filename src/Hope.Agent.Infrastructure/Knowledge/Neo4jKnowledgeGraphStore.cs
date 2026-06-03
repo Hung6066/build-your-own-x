@@ -138,6 +138,54 @@ internal sealed class Neo4jKnowledgeGraphStore(IDriver driver, Neo4jOptions opti
         }
     }
 
+    public async Task LinkMemoryAsync(Guid memoryId, Guid userId, IReadOnlyList<string> entityIds, CancellationToken ct)
+    {
+        if (entityIds.Count == 0) return;
+        await using var session = driver.AsyncSession(Session());
+        try
+        {
+            await session.ExecuteWriteAsync(async tx =>
+            {
+                await tx.RunAsync(@"
+                    MERGE (m:Memory {id: $mid})
+                    ON CREATE SET m.userId=$uid, m.createdAt=$at
+                    WITH m
+                    UNWIND $entityIds AS eid
+                    MATCH (e:Entity {id: eid})
+                    MERGE (m)-[:MENTIONS]->(e)",
+                    new { mid = memoryId.ToString(), uid = userId.ToString(), at = DateTime.UtcNow, entityIds = entityIds.ToArray() });
+            });
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Neo4j memory link failed for memory={MemoryId}", memoryId);
+        }
+    }
+
+    public async Task<IReadOnlyList<Guid>> MemoriesForEntityAsync(string entityId, int take, CancellationToken ct)
+    {
+        await using var session = driver.AsyncSession(Session());
+        try
+        {
+            var cursor = await session.RunAsync(@"
+                MATCH (m:Memory)-[:MENTIONS]->(e:Entity {id: $eid})
+                RETURN m.id AS id ORDER BY m.createdAt DESC LIMIT $take",
+                new { eid = entityId, take });
+            var list = new List<Guid>();
+            await foreach (var rec in cursor)
+            {
+                if (Guid.TryParse(rec["id"].As<string>(), out var gid))
+                    list.Add(gid);
+            }
+            return list;
+        }
+        catch (Exception ex)
+        {
+            log.LogWarning(ex, "Neo4j memories-for-entity failed for entity={EntityId}", entityId);
+            return Array.Empty<Guid>();
+        }
+    }
+
     private static DateTimeOffset ToOffset(object? o) => o switch
     {
         DateTime dt => new DateTimeOffset(DateTime.SpecifyKind(dt, DateTimeKind.Utc)),

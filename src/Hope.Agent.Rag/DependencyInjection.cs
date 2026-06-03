@@ -26,7 +26,7 @@ public static class DependencyInjection
 
         services.AddScoped<IIngestionService, IngestionService>();
         services.AddSingleton<IReranker, LlmReranker>();
-        services.AddScoped<IRetriever, HybridRetriever>();
+        services.AddSingleton<IRetriever, HybridRetriever>();
         services.AddHostedService<IngestionWorker>();
         return services;
     }
