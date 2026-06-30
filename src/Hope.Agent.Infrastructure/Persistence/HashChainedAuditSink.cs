@@ -2,8 +2,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Hope.Agent.Application.Abstractions;
+using Hope.Agent.Application.Security;
 using Hope.Agent.Domain.Audit;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
 namespace Hope.Agent.Infrastructure.Persistence;
@@ -25,9 +27,9 @@ namespace Hope.Agent.Infrastructure.Persistence;
 internal sealed class HashChainedAuditSink(
     IAuditSink inner,
     IConnectionMultiplexer redis,
+    IOptionsMonitor<DataPerimeterOptions> perimeter,
     ILogger<HashChainedAuditSink> log) : IAuditSink
 {
-    private const string HeadKey = "audit:chain:head";
     private const string Genesis = "0000000000000000000000000000000000000000000000000000000000000000";
 
     private static readonly JsonSerializerOptions CanonicalJson = new()
@@ -40,7 +42,8 @@ internal sealed class HashChainedAuditSink(
     {
         var db = redis.GetDatabase();
 
-        var prevHash = (string?)await db.StringGetAsync(HeadKey) ?? Genesis;
+        var headKey = $"{(string.IsNullOrWhiteSpace(perimeter.CurrentValue.RedisKeyPrefix) ? "hope" : perimeter.CurrentValue.RedisKeyPrefix.Trim(':'))}:audit:chain:head";
+        var prevHash = (string?)await db.StringGetAsync(headKey) ?? Genesis;
 
         var data = string.IsNullOrWhiteSpace(evt.PayloadJson) ? "{}" : evt.PayloadJson;
         var hashInput = prevHash + "|" + evt.Id.ToString("N") + "|" + data;
@@ -56,6 +59,7 @@ internal sealed class HashChainedAuditSink(
         var wrapped = new AuditEvent
         {
             Id = evt.Id,
+            TenantId = evt.TenantId,
             OccurredAt = evt.OccurredAt,
             UserId = evt.UserId,
             Actor = evt.Actor,
@@ -65,13 +69,18 @@ internal sealed class HashChainedAuditSink(
             PatientId = evt.PatientId,
             CorrelationId = evt.CorrelationId,
             Reason = evt.Reason,
+            DeploymentVersion = evt.DeploymentVersion,
+            PromptVersion = evt.PromptVersion,
+            ModelVersion = evt.ModelVersion,
+            ToolsetVersion = evt.ToolsetVersion,
+            PolicyVersion = evt.PolicyVersion,
             PayloadJson = envelope,
         };
 
         await inner.WriteAsync(wrapped, ct);
 
         // Advance the head only after successful persistence.
-        var advanced = await db.StringSetAsync(HeadKey, currHash);
+        var advanced = await db.StringSetAsync(headKey, currHash);
         if (!advanced)
         {
             log.LogError(

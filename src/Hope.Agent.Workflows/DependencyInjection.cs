@@ -22,18 +22,30 @@ public static class DependencyInjection
         services.AddSingleton<ITemporalClient>(sp =>
         {
             var log = sp.GetRequiredService<ILogger<TemporalWorkflowDispatcher>>();
-            try
+            var hosts = options.TargetHosts.Length > 0
+                ? options.TargetHosts.Where(h => !string.IsNullOrWhiteSpace(h)).ToArray()
+                : [options.TargetHost];
+
+            Exception? last = null;
+            foreach (var host in hosts)
             {
-                return TemporalClient.ConnectAsync(new TemporalClientConnectOptions(options.TargetHost)
+                try
                 {
-                    Namespace = options.Namespace,
-                }).GetAwaiter().GetResult();
+                    return TemporalClient.ConnectAsync(new TemporalClientConnectOptions(host)
+                    {
+                        Namespace = options.Namespace,
+                    }).GetAwaiter().GetResult();
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    log.LogWarning(ex, "Temporal endpoint unavailable at {Host}; trying next endpoint.", host);
+                }
             }
-            catch (Exception ex)
-            {
-                log.LogWarning(ex, "Temporal server unavailable at {Host}; workflow dispatch will be degraded until reconnected.", options.TargetHost);
-                throw; // let callers handle unavailability; do not swallow so IWorkflowDispatcher can 503
-            }
+
+            throw new InvalidOperationException(
+                $"Temporal endpoints unavailable: {string.Join(",", hosts)}",
+                last);
         });
 
         services.AddScoped<IWorkflowDispatcher, TemporalWorkflowDispatcher>();

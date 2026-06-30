@@ -1,5 +1,7 @@
 using Hope.Agent.Application.LLM;
 using Hope.Agent.Application.Learning;
+using Hope.Agent.Application.Security;
+using Hope.Agent.Domain.Autonomy;
 using Hope.Agent.Domain.Learning;
 using Hope.Agent.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +19,7 @@ internal sealed class BanditAdaptiveRouter(
     IEnumerable<IChatCompletionProvider> providers,
     AgentDbContext db,
     IMemoryCache statsCache,
+    ISecureModelRoutingPolicy routingPolicy,
     ILogger<BanditAdaptiveRouter> log) : IAdaptiveRouter
 {
     private const double ExplorationC = 1.4;
@@ -28,7 +31,7 @@ internal sealed class BanditAdaptiveRouter(
         if (_arms.Count <= 1)
         {
             var only = fallback.SelectChat();
-            return new RouterChoice(only.Name, only.Name);
+            return ApplySecurityPolicy(intent, only.Name, only.Name);
         }
 
         var cacheKey = $"routing_stats:{intent}";
@@ -60,7 +63,7 @@ internal sealed class BanditAdaptiveRouter(
         }
 
         log.LogDebug("Adaptive router chose {Provider} for intent {Intent} (score={Score:F3})", best.Name, intent, bestScore);
-        return new RouterChoice(best.Name, best.Name);
+        return ApplySecurityPolicy(intent, best.Name, best.Name);
     }
 
     public async Task RecordOutcomeAsync(string intent, string provider, string model, double reward, double latencyMs, bool failed, CancellationToken ct)
@@ -92,4 +95,39 @@ internal sealed class BanditAdaptiveRouter(
 
         await db.SaveChangesAsync(ct);
     }
+
+    private RouterChoice ApplySecurityPolicy(string intent, string provider, string model)
+    {
+        var sensitive = LooksSensitive(intent);
+        var decision = routingPolicy.Evaluate(new ModelRoutingPolicyRequest(
+            TenantId: null,
+            Intent: intent,
+            Provider: provider,
+            Model: model,
+            RiskLevel: sensitive ? AutonomyRiskLevel.High : AutonomyRiskLevel.Low,
+            Sensitivity: sensitive ? DataSensitivity.Phi : DataSensitivity.Internal,
+            CostLatencyOptimized: true));
+
+        if (decision.Allowed)
+            return new RouterChoice(provider, model);
+
+        var fallbackProvider = _arms.FirstOrDefault(x => string.Equals(x.Name, decision.Provider, StringComparison.OrdinalIgnoreCase))
+            ?? _arms.FirstOrDefault(x => string.Equals(x.Name, fallback.SelectChat().Name, StringComparison.OrdinalIgnoreCase))
+            ?? _arms[0];
+        log.LogWarning(
+            "Secure model routing blocked provider={Provider} intent={Intent} reason={Reason}; fallback={Fallback}",
+            provider,
+            intent,
+            decision.Reason,
+            fallbackProvider.Name);
+        return new RouterChoice(fallbackProvider.Name, fallbackProvider.Name);
+    }
+
+    private static bool LooksSensitive(string intent)
+        => intent.Contains("medical", StringComparison.OrdinalIgnoreCase)
+           || intent.Contains("clinical", StringComparison.OrdinalIgnoreCase)
+           || intent.Contains("patient", StringComparison.OrdinalIgnoreCase)
+           || intent.Contains("phi", StringComparison.OrdinalIgnoreCase)
+           || intent.Contains("summary", StringComparison.OrdinalIgnoreCase)
+           || intent.Contains("reminder", StringComparison.OrdinalIgnoreCase);
 }

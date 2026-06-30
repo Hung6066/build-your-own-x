@@ -1,7 +1,9 @@
 using Hope.Agent.Application.Agents;
+using Hope.Agent.Application.Autonomy;
 using Hope.Agent.Application.Learning;
 using Hope.Agent.Application.Tools;
 using Hope.Agent.Domain.Learning;
+using Hope.Agent.Domain.Autonomy;
 using Microsoft.Extensions.Logging;
 
 namespace Hope.Agent.MultiAgent.Learning;
@@ -22,6 +24,7 @@ internal sealed class WorkflowOutcomeSink(
     ISkillLibrary skillLibrary,
     IFeedbackStore feedbackStore,
     IOptimizationCostHints? costHints,
+    IAgentDecisionStore? decisionStore,
     ILogger<WorkflowOutcomeSink> log) : IWorkflowOutcomeSink
 {
     public async Task RecordAsync(WorkflowOutcome outcome, CancellationToken ct)
@@ -55,6 +58,21 @@ internal sealed class WorkflowOutcomeSink(
                 var doctorId = ctx.GetValueOrDefault("doctor_id", ctx.GetValueOrDefault("doctor", "unknown"));
                 var specialty = ctx.GetValueOrDefault("specialty", "unknown");
                 await costHints.RecordOutcomeAsync(doctorId, specialty, outcome.Success, ct);
+            }
+
+            if (decisionStore is not null && !string.IsNullOrWhiteSpace(outcome.CorrelationId))
+            {
+                var now = DateTimeOffset.UtcNow;
+                var recent = await decisionStore.QueryAsync(null, null, now.AddDays(-1), now, 50, ct);
+                var decision = recent.FirstOrDefault(x => string.Equals(x.CorrelationId, outcome.CorrelationId, StringComparison.Ordinal));
+                if (decision is not null)
+                {
+                    await decisionStore.UpdateStatusAsync(
+                        decision.DecisionId,
+                        outcome.Success ? AgentDecisionStatus.Approved : AgentDecisionStatus.Failed,
+                        outcome.Success ? "workflow_outcome_success" : "workflow_outcome_failed",
+                        ct);
+                }
             }
         }
         catch (Exception ex)

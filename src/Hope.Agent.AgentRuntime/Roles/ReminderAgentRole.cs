@@ -1,6 +1,10 @@
 using Hope.Agent.Application.Agents.Multi;
+using Hope.Agent.Application.LLM;
+using Hope.Agent.Application.Security;
+using Hope.Agent.Application.Tools;
 using Hope.Agent.Application.Workflows;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace Hope.Agent.AgentRuntime.Roles;
 
@@ -12,6 +16,8 @@ namespace Hope.Agent.AgentRuntime.Roles;
 /// </summary>
 internal sealed class ReminderAgentRole(
     IWorkflowDispatcher workflows,
+    IToolRegistry tools,
+    IPhiRedactor phi,
     ILogger<ReminderAgentRole> log) : IAgentRole
 {
     public string Name => "reminder";
@@ -24,7 +30,7 @@ internal sealed class ReminderAgentRole(
 
     public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
     {
-        log.LogInformation("[Reminder] UserId={UserId} Input={Input}", task.UserId, task.Input);
+        log.LogInformation("[Reminder] UserId={UserId} Input={Input}", task.UserId, phi.Redact(task.Input));
 
         task.Context.TryGetValue("patient_id", out var rawPatientId);
         _ = Guid.TryParse(rawPatientId, out var patientId);
@@ -41,6 +47,7 @@ internal sealed class ReminderAgentRole(
         if (durationDays <= 0) durationDays = 30;
         if (riskScore <= 0) riskScore = ComputeDefaultRiskScore(task.Context);
 
+        var reminderId = $"REM-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.CreateVersion7().ToString("N")[..8].ToUpperInvariant()}";
         var input = new MedicationReminderInput(
             PatientId: patientId == Guid.Empty ? Guid.CreateVersion7() : patientId,
             UserId: task.UserId,
@@ -50,11 +57,34 @@ internal sealed class ReminderAgentRole(
             StartAt: DateTimeOffset.UtcNow.AddHours(1),
             DurationDays: durationDays,
             PreferredChannel: channel ?? "zalo",
-            AdherenceRiskScore: riskScore);
+            AdherenceRiskScore: riskScore,
+            ReminderId: reminderId);
 
         var workflowId = $"reminder-{input.PatientId:N}-{Guid.CreateVersion7():N}";
         var started = await workflows.StartMedicationReminderAsync(input, workflowId, ct)
             .ConfigureAwait(false);
+
+        if (tools.Find("create_reminder_record") is { } persistTool)
+        {
+            var toolCtx = new ToolInvocationContext(task.UserId, task.ConversationId ?? Guid.Empty, task.CorrelationId ?? string.Empty);
+            var toolArgs = JsonSerializer.Serialize(new
+            {
+                reminder_id = reminderId,
+                patient_id = input.PatientId.ToString(),
+                workflow_id = started.WorkflowId,
+                reminder_type = "medication",
+                medication_name = input.MedicationName,
+                dosage = input.Dosage,
+                frequency = input.Frequency,
+                start_at = input.StartAt.ToString("O"),
+                duration_days = input.DurationDays,
+                preferred_channel = input.PreferredChannel,
+                adherence_risk_score = input.AdherenceRiskScore,
+                status = "scheduled",
+            });
+
+            await persistTool.InvokeAsync(toolArgs, toolCtx, ct).ConfigureAwait(false);
+        }
 
         log.LogInformation("[Reminder] Workflow started: {WorkflowId} RiskScore={Risk}",
             started.WorkflowId, riskScore);
@@ -77,6 +107,7 @@ internal sealed class ReminderAgentRole(
                 "Bệnh nhân bỏ thuốc 3 lần liên tiếp → bác sĩ phụ trách sẽ được thông báo.",
             Metadata: new Dictionary<string, string>
             {
+                ["reminder_id"] = reminderId,
                 ["workflow_id"] = started.WorkflowId,
                 ["risk_score"] = riskScore.ToString(),
                 ["medication"] = input.MedicationName,

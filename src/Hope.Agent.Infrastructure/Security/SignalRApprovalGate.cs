@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Hope.Agent.Application.Notifications;
 using Hope.Agent.Application.Observability;
+using Hope.Agent.Application.Governance;
 using Hope.Agent.Application.Security;
 using Hope.Agent.Domain.Security;
 using Microsoft.Extensions.DependencyInjection;
@@ -18,6 +19,7 @@ internal sealed class SignalRApprovalGate(
     IRealtimeNotifier notifier,
     IServiceScopeFactory scopeFactory,
     IOptionsMonitor<ToolApprovalOptions> opts,
+    IOptionsMonitor<ApprovalSlaOptions> sla,
     ILogger<SignalRApprovalGate> log) : IToolApprovalGate
 {
     private readonly ConcurrentDictionary<Guid, TaskCompletionSource<ApprovalResult>> _pending = new();
@@ -46,7 +48,7 @@ internal sealed class SignalRApprovalGate(
         var tcs = new TaskCompletionSource<ApprovalResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pending[id] = tcs;
 
-        var timeoutSeconds = Math.Max(1, opts.CurrentValue.TimeoutSeconds);
+        var timeoutSeconds = ResolveTimeoutSeconds(input.Impact);
         HopeMeters.ToolApprovalsRequested.Add(1,
             new KeyValuePair<string, object?>("tool", input.ToolName),
             new KeyValuePair<string, object?>("impact", input.Impact.ToString()));
@@ -66,6 +68,8 @@ internal sealed class SignalRApprovalGate(
                     ["approvalId"] = id.ToString(),
                     ["tool"] = input.ToolName,
                     ["impact"] = input.Impact.ToString(),
+                    ["slaSeconds"] = timeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    ["escalationRole"] = ResolveEscalationRole(input.Impact),
                     ["arguments"] = input.ArgumentsJson,
                     ["conversationId"] = input.ConversationId.ToString(),
                 });
@@ -92,9 +96,33 @@ internal sealed class SignalRApprovalGate(
             var timedOut = new ApprovalResult(false, "approval_timeout", null, ToolApprovalStatus.TimedOut);
             await PersistDecisionAsync(id, timedOut, CancellationToken.None);
             HopeMeters.ToolApprovalsTimedOut.Add(1, new KeyValuePair<string, object?>("tool", input.ToolName));
+            HopeMeters.PolicyDenials.Add(1, new KeyValuePair<string, object?>("rule", "approval_timeout"));
             return timedOut;
         }
     }
+
+    private int ResolveTimeoutSeconds(ToolImpactLevel impact)
+    {
+        var key = SlaKey(impact);
+        if (sla.CurrentValue.ByRisk.TryGetValue(key, out var policy))
+            return Math.Max(1, policy.TimeoutSeconds);
+        return Math.Max(1, sla.CurrentValue.DefaultTimeoutSeconds > 0 ? sla.CurrentValue.DefaultTimeoutSeconds : opts.CurrentValue.TimeoutSeconds);
+    }
+
+    private string ResolveEscalationRole(ToolImpactLevel impact)
+    {
+        var key = SlaKey(impact);
+        return sla.CurrentValue.ByRisk.TryGetValue(key, out var policy)
+            ? policy.EscalationRole
+            : sla.CurrentValue.DefaultEscalationRole;
+    }
+
+    private static string SlaKey(ToolImpactLevel impact) => impact switch
+    {
+        ToolImpactLevel.Write => "Medium",
+        ToolImpactLevel.Critical => "Critical",
+        _ => impact.ToString(),
+    };
 
     public async Task<bool> CompleteAsync(Guid requestId, bool approved, string? reason, Guid decidedBy, CancellationToken ct)
     {

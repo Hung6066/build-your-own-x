@@ -1,4 +1,5 @@
 using Hope.Agent.Application.Agents.Multi;
+using Hope.Agent.Application.Security;
 using Hope.Agent.Application.Workflows;
 using Microsoft.Extensions.Logging;
 
@@ -11,6 +12,7 @@ namespace Hope.Agent.AgentRuntime.Roles;
 /// </summary>
 internal sealed class SchedulingAgentRole(
     IWorkflowDispatcher workflows,
+    IPhiRedactor phi,
     ILogger<SchedulingAgentRole> log) : IAgentRole
 {
     public string Name => "scheduling";
@@ -23,8 +25,8 @@ internal sealed class SchedulingAgentRole(
 
     public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
     {
-        log.LogInformation("[Scheduling] PatientId={PatientId} Input={Input}",
-            task.UserId, task.Input);
+        log.LogInformation("[Scheduling] UserId={UserId} Input={Input}",
+            task.UserId, phi.Redact(task.Input));
 
         task.Context.TryGetValue("patient_id", out var rawPatientId);
         _ = Guid.TryParse(rawPatientId, out var patientId);
@@ -58,7 +60,7 @@ internal sealed class SchedulingAgentRole(
             {
                 ["workflow_id"] = started.WorkflowId,
                 ["urgency"] = urgency,
-                ["chief_complaint"] = task.Input,
+                ["chief_complaint"] = phi.Redact(task.Input),
             });
     }
 

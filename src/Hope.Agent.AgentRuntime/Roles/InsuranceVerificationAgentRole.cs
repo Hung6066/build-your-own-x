@@ -1,4 +1,5 @@
 using Hope.Agent.Application.Agents.Multi;
+using Hope.Agent.Application.Security;
 using Hope.Agent.Application.Workflows;
 using Microsoft.Extensions.Logging;
 
@@ -11,6 +12,7 @@ namespace Hope.Agent.AgentRuntime.Roles;
 /// </summary>
 internal sealed class InsuranceVerificationAgentRole(
     IWorkflowDispatcher workflows,
+    IPhiRedactor phi,
     ILogger<InsuranceVerificationAgentRole> log) : IAgentRole
 {
     public string Name => "insurance";
@@ -23,7 +25,7 @@ internal sealed class InsuranceVerificationAgentRole(
 
     public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
     {
-        log.LogInformation("[Insurance] UserId={UserId} Input={Input}", task.UserId, task.Input);
+        log.LogInformation("[Insurance] UserId={UserId} Input={Input}", task.UserId, phi.Redact(task.Input));
 
         task.Context.TryGetValue("patient_id", out var rawPatientId);
         _ = Guid.TryParse(rawPatientId, out var patientId);
@@ -53,7 +55,7 @@ internal sealed class InsuranceVerificationAgentRole(
             Metadata: new Dictionary<string, string>
             {
                 ["workflow_id"] = started.WorkflowId,
-                ["insurance_card"] = insuranceCard ?? "pending",
+                ["insurance_card"] = string.IsNullOrWhiteSpace(insuranceCard) ? "pending" : "[REDACTED]",
                 ["specialty"] = specialty ?? "unknown",
             });
     }
@@ -64,7 +66,7 @@ internal sealed class InsuranceVerificationAgentRole(
             return "Vui lòng cung cấp số thẻ BHYT hoặc chụp ảnh thẻ để tôi kiểm tra quyền lợi bảo hiểm của bạn.";
 
         return
-            $"Đang kiểm tra thẻ BHYT {card} cho chuyên khoa {specialty ?? "tổng quát"}.\n" +
+            $"Đang kiểm tra thẻ BHYT [ĐÃ ẨN] cho chuyên khoa {specialty ?? "tổng quát"}.\n" +
             "Kết quả sẽ bao gồm:\n" +
             "• Trạng thái thẻ (còn hạn / hết hạn)\n" +
             "• Mức hưởng BHYT (%)\n" +

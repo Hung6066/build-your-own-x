@@ -9,6 +9,9 @@
     <ProjectReference Include="..\Hope.Agent.Application\Hope.Agent.Application.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Hope.Agent.Tests.Unit" />
+  </ItemGroup>
+  <ItemGroup>
     <None Update="Learning\golden-suite.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

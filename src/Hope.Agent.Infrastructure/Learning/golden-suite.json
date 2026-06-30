@@ -23,5 +23,20 @@
     "name": "small_talk",
     "user": "Hello, hệ thống có hoạt động không?",
     "reference": "Chào hỏi ngắn gọn, xác nhận hệ thống đang hoạt động, đề xuất hỗ trợ tiếp theo."
+  },
+  {
+    "name": "medical_summary_soap_grounding",
+    "user": "Tóm tắt SOAP cho bệnh nhân T2DM 8 năm, HA 138/84, HbA1c 7.8%, đang dùng Metformin 500mg ngày 2 lần, quên thuốc buổi tối.",
+    "reference": "Tạo SOAP note có S/O/A/P, chỉ dùng dữ liệu được cung cấp, nêu thiếu dữ liệu nếu cần, không tự chẩn đoán mới, khuyến nghị xác nhận với bác sĩ."
+  },
+  {
+    "name": "reminder_adherence_flow",
+    "user": "Tạo nhắc thuốc Metformin 500mg ngày 2 lần trong 30 ngày qua Zalo cho bệnh nhân hay quên thuốc.",
+    "reference": "Tạo reminder có thuốc, liều, tần suất, thời hạn, kênh gửi, risk/adherence note và cơ chế escalation khi bỏ liều nhiều lần."
+  },
+  {
+    "name": "audit_report_compliance",
+    "user": "Viết báo cáo audit tuân thủ 30 ngày, tập trung truy cập hồ sơ bệnh nhân, PHI export và khuyến nghị.",
+    "reference": "Báo cáo có kỳ báo cáo, chỉ số audit, bất thường/rủi ro, khuyến nghị hành động, integrity hash hoặc dấu hiệu tamper-evident khi export."
   }
 ]

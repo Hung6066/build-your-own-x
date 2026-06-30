@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Hope.Agent.Application.Learning;
 using Hope.Agent.Application.Observability;
+using Hope.Agent.Application.Prompts;
 using Hope.Agent.Domain.Learning;
 using Hope.Agent.Shared;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -82,6 +83,16 @@ public static class LearningEndpoints
             return Results.Ok(trend);
         }).WithSummary("Score trend over time — use to verify the agent is improving.");
 
+        grp.MapGet("/eval/metrics", async (
+            [FromQuery] string? suite,
+            [FromQuery] int? days,
+            [FromServices] IEvaluationHarness harness,
+            CancellationToken ct) =>
+        {
+            var metrics = await harness.GetMetricsAsync(suite ?? "default", days ?? 30, ct);
+            return Results.Ok(metrics);
+        }).WithSummary("Evaluation metrics: task success, hallucination, tool-call accuracy, faithfulness, latency, cost.");
+
         // ── Elo leaderboard ─────────────────────────────────────────────────────
         grp.MapGet("/eval/leaderboard", async (
             [FromQuery] string? suite,
@@ -108,6 +119,20 @@ public static class LearningEndpoints
                 return Results.BadRequest(new { error = ex.Message });
             }
         }).WithSummary("Co-Scientist-style Elo tournament between the two most recent runs.");
+
+        grp.MapPost("/prompts/{promptName}/optimize", async (
+            string promptName,
+            [FromBody] PromptOptimizeRequest? req,
+            [FromServices] IPromptOptimizationService optimizer,
+            CancellationToken ct) =>
+        {
+            var result = await optimizer.OptimizeAsync(
+                promptName,
+                req?.Suite ?? "default",
+                req?.AutoPromote,
+                ct);
+            return Results.Ok(result);
+        }).WithSummary("DSPy-style prompt optimization loop: generate candidates, evaluate, optionally promote.");
 
         // ── Eval case management ────────────────────────────────────────────────
         grp.MapGet("/eval/cases", async (
@@ -174,3 +199,5 @@ public sealed record AddEvalCaseRequest(
     string ReferenceAnswer,
     string? Suite = null,
     string? Tags = null);
+
+public sealed record PromptOptimizeRequest(string? Suite = null, bool? AutoPromote = null);

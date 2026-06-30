@@ -1,4 +1,5 @@
 using Hope.Agent.Application.Agents.Multi;
+using Hope.Agent.Application.Security;
 using Hope.Agent.Application.Workflows;
 using Microsoft.Extensions.Logging;
 
@@ -11,6 +12,7 @@ namespace Hope.Agent.AgentRuntime.Roles;
 /// </summary>
 internal sealed class AuditReportAgentRole(
     IWorkflowDispatcher workflows,
+    IPhiRedactor phi,
     ILogger<AuditReportAgentRole> log) : IAgentRole
 {
     public string Name => "audit-report";
@@ -23,7 +25,7 @@ internal sealed class AuditReportAgentRole(
 
     public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
     {
-        log.LogInformation("[AuditReport] UserId={UserId} Input={Input}", task.UserId, task.Input);
+        log.LogInformation("[AuditReport] UserId={UserId} Input={Input}", task.UserId, phi.Redact(task.Input));
 
         task.Context.TryGetValue("report_type", out var reportType);
         task.Context.TryGetValue("period_start", out var rawStart);

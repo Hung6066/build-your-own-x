@@ -22,8 +22,11 @@ internal sealed class ChiefMedicalAgent(
     IAdaptiveRouter? adaptiveRouter = null,
     IGovernanceGate? gate = null) : IMultiAgentOrchestrator
 {
-    private readonly Dictionary<string, IAgentRole> _byName = roles.ToDictionary(r => r.Name, StringComparer.OrdinalIgnoreCase);
-    private readonly IReadOnlyList<IAgentRole> _all = [.. roles];
+    private readonly IReadOnlyList<IAgentRole> _all =
+        [.. roles.GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase).Select(g => g.First())];
+    private readonly Dictionary<string, IAgentRole> _byName =
+        roles.GroupBy(r => r.Name, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
     public async Task<MultiAgentResult> DispatchAsync(AgentTask task, CancellationToken ct)
     {

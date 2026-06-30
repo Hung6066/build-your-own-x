@@ -13,6 +13,9 @@ public sealed class QdrantMemoryStore(QdrantClient client, QdrantOptions options
 
     public async Task UpsertAsync(MemoryRecord record, ReadOnlyMemory<float> embedding, CancellationToken ct)
     {
+        if (options.RequireTenantPayloadFilter && record.TenantId is null)
+            throw new InvalidOperationException("Qdrant memory upsert requires TenantId when tenant payload filtering is enabled.");
+
         await EnsureCollectionAsync(embedding.Length, ct);
         var named = new NamedVectors();
         named.Vectors[DenseVector] = embedding.ToArray();
@@ -28,6 +31,7 @@ public sealed class QdrantMemoryStore(QdrantClient client, QdrantOptions options
             Vectors = new Vectors { Vectors_ = named },
         };
         point.Payload["user_id"] = record.UserId.ToString();
+        point.Payload["tenant_id"] = record.TenantId?.ToString() ?? string.Empty;
         point.Payload["conversation_id"] = record.ConversationId?.ToString() ?? string.Empty;
         point.Payload["kind"] = (int)record.Kind;
         point.Payload["content"] = record.Content;
@@ -207,4 +211,6 @@ public sealed class QdrantOptions
     public int Port { get; set; } = 6334;
     public string Collection { get; set; } = "agent_memory_v2";
     public string? ApiKey { get; set; }
+    public bool RequireTenantPayloadFilter { get; set; }
+    public string TenantPayloadKey { get; set; } = "tenant_id";
 }

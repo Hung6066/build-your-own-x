@@ -1,0 +1,61 @@
+{
+  "name": "hope-agent-security-policy",
+  "version": "security-policy-v1",
+  "rules": [
+    {
+      "id": "deny_unknown_tool",
+      "effect": "deny",
+      "priority": 1000,
+      "actions": [ "tool:*" ],
+      "resources": [ "unknown", "" ],
+      "roles": [],
+      "risks": [],
+      "requireTenant": false,
+      "reason": "Unknown tool/resource is denied by default."
+    },
+    {
+      "id": "deny_critical_without_admin",
+      "effect": "deny",
+      "priority": 900,
+      "actions": [ "tool:export_audit_report", "tool:phi_export", "autonomy:critical" ],
+      "resources": [ "*" ],
+      "roles": [ "doctor", "nurse", "user" ],
+      "risks": [ "Critical", "High" ],
+      "requireTenant": true,
+      "reason": "Critical/high-risk action requires admin or explicit approval owner."
+    },
+    {
+      "id": "allow_admin_critical",
+      "effect": "allow",
+      "priority": 800,
+      "actions": [ "tool:export_audit_report", "autonomy:*" ],
+      "resources": [ "*" ],
+      "roles": [ "admin", "ai_safety_officer" ],
+      "risks": [ "Critical", "High", "Medium", "Low", "ReadOnly", "Write" ],
+      "requireTenant": true,
+      "reason": "Admin/safety role may request critical actions; downstream approval still applies."
+    },
+    {
+      "id": "allow_clinical_write_roles",
+      "effect": "allow",
+      "priority": 700,
+      "actions": [ "tool:persist_medical_summary", "tool:create_reminder_record", "tool:update_reminder_status", "tool:commit_booking" ],
+      "resources": [ "*" ],
+      "roles": [ "doctor", "nurse", "admin" ],
+      "risks": [ "Write", "Medium", "High" ],
+      "requireTenant": true,
+      "reason": "Clinical write tools require clinical role and tenant context."
+    },
+    {
+      "id": "allow_readonly_authenticated",
+      "effect": "allow",
+      "priority": 100,
+      "actions": [ "tool:*", "rag:*", "dashboard:read" ],
+      "resources": [ "*" ],
+      "roles": [ "doctor", "nurse", "admin", "user", "system", "ai_safety_officer" ],
+      "risks": [ "ReadOnly", "Low" ],
+      "requireTenant": false,
+      "reason": "Read-only or low-risk action is allowed for authenticated roles."
+    }
+  ]
+}

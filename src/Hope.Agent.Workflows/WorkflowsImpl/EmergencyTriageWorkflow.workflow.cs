@@ -20,17 +20,7 @@ public class EmergencyTriageWorkflow
     [WorkflowRun]
     public async Task<EmergencyTriageResult> RunAsync(EmergencyTriageInput input)
     {
-        var actOpts = new ActivityOptions
-        {
-            StartToCloseTimeout = TimeSpan.FromMinutes(1),
-            RetryPolicy = new RetryPolicy
-            {
-                InitialInterval = TimeSpan.FromSeconds(1),
-                BackoffCoefficient = 2.0F,
-                MaximumInterval = TimeSpan.FromSeconds(30),
-                MaximumAttempts = 6,
-            },
-        };
+        var actOpts = WorkflowCommon.DefaultActivityOptions(TimeSpan.FromMinutes(1));
 
         Workflow.Logger.LogInformation("Triage workflow started for patient {Patient}", input.PatientId);
         status = "triaging";

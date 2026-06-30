@@ -54,6 +54,22 @@ internal sealed class MedicationReminderToolModule : IWorkflowModule
     public void RegisterServices(IServiceCollection services)
     {
         services.AddSingleton<IAgentTool, GetMedicationScheduleTool>();
+        services.AddSingleton<IAgentTool, CreateReminderRecordTool>();
+        services.AddSingleton<IAgentTool, UpdateReminderStatusTool>();
+    }
+}
+
+/// <summary>
+/// Tool phục vụ <c>MedicalSummaryAgent</c>.
+/// Bước: persist_medical_summary (ghi tóm tắt/SOAP note vào Postgres).
+/// </summary>
+internal sealed class MedicalSummaryToolModule : IWorkflowModule
+{
+    public string WorkflowName => "medical-summary";
+
+    public void RegisterServices(IServiceCollection services)
+    {
+        services.AddSingleton<IAgentTool, PersistMedicalSummaryTool>();
     }
 }
 

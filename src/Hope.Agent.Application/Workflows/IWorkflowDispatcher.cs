@@ -82,7 +82,8 @@ public sealed record MedicationReminderInput(
     DateTimeOffset StartAt,
     int DurationDays,
     string PreferredChannel = "zalo",
-    int AdherenceRiskScore = 30);
+    int AdherenceRiskScore = 30,
+    string? ReminderId = null);
 
 public sealed record ReminderConfirmation(string WorkflowId, bool Confirmed, string? Note);
 

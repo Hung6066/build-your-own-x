@@ -1,6 +1,9 @@
 using System.Text.Json;
+using System.Net.Http;
 using Hope.Agent.Application.LLM;
 using Hope.Agent.Application.Tools;
+using Hope.Agent.Application.Workflows;
+using Microsoft.Extensions.Options;
 
 namespace Hope.Agent.Tools;
 
@@ -146,7 +149,7 @@ public sealed class GetDoctorSlotsTool : IAgentTool
 
 // ── HIS Booking Commit ────────────────────────────────────────────────────────
 
-public sealed class CommitBookingTool : IAgentTool
+public sealed class CommitBookingTool(IAppointmentBookingStore bookingStore) : IAgentTool
 {
     public ToolDefinition Definition { get; } = new(
         "commit_booking",
@@ -165,29 +168,56 @@ public sealed class CommitBookingTool : IAgentTool
         }
         """);
 
-    public Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
+    public async Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
     {
         var args = JsonDocument.Parse(argumentsJson).RootElement;
         var bookingId = args.TryGetProperty("booking_id", out var b) && b.GetString() is { } bid
             ? bid
             : $"BK-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}";
 
-        return Task.FromResult(JsonSerializer.Serialize(new
+        var patientIdText = args.GetProperty("patient_id").GetString();
+        var patientId = Guid.TryParse(patientIdText, out var parsedPatientId)
+            ? parsedPatientId
+            : (Guid?)null;
+        var doctorId = args.GetProperty("doctor_id").GetString() ?? "DR-GEN-001";
+        var slotId = args.GetProperty("slot_id").GetString() ?? $"SLOT-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
+        var reason = args.TryGetProperty("reason", out var reasonValue) ? reasonValue.GetString() : null;
+        var appointmentTime = args.TryGetProperty("time", out var timeValue)
+            && DateTimeOffset.TryParse(timeValue.GetString(), out var parsedTime)
+                ? parsedTime
+                : (DateTimeOffset?)null;
+        var confirmedAt = DateTimeOffset.UtcNow;
+
+        await bookingStore.SaveAsync(new AppointmentBookingWrite(
+            BookingId: bookingId,
+            PatientId: patientId,
+            UserId: context.UserId,
+            DoctorId: doctorId,
+            SlotId: slotId,
+            Reason: reason,
+            AppointmentTime: appointmentTime,
+            Status: "confirmed",
+            ConfirmedAt: confirmedAt,
+            CorrelationId: context.CorrelationId), ct).ConfigureAwait(false);
+
+        return JsonSerializer.Serialize(new
         {
             booking_id = bookingId,
-            patient_id = args.GetProperty("patient_id").GetString(),
-            doctor_id = args.GetProperty("doctor_id").GetString(),
-            slot_id = args.GetProperty("slot_id").GetString(),
+            patient_id = patientIdText,
+            doctor_id = doctorId,
+            slot_id = slotId,
             status = "confirmed",
-            confirmed_at = DateTimeOffset.UtcNow.ToString("O"),
+            confirmed_at = confirmedAt.ToString("O"),
             hl7_message_id = $"MSG-{Guid.NewGuid():N}",
-        }));
+        });
     }
 }
 
 // ── Medication Schedule ───────────────────────────────────────────────────────
 
-public sealed class GetMedicationScheduleTool : IAgentTool
+public sealed class GetMedicationScheduleTool(
+    IOptions<ClinicalIntegrationOptions>? options = null,
+    IHttpClientFactory? httpFactory = null) : IAgentTool
 {
     public ToolDefinition Definition { get; } = new(
         "get_medication_schedule",
@@ -203,11 +233,33 @@ public sealed class GetMedicationScheduleTool : IAgentTool
         }
         """);
 
-    public Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
+    public async Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
     {
         var args = JsonDocument.Parse(argumentsJson).RootElement;
         var patientId = args.GetProperty("patient_id").GetString();
         var includePast = args.TryGetProperty("include_past", out var ip) && ip.GetBoolean();
+        var cfg = options?.Value;
+
+        if (!string.IsNullOrWhiteSpace(cfg?.HisBaseUrl) && httpFactory is not null)
+        {
+            var client = httpFactory.CreateClient("clinical-integrations");
+            if (!string.IsNullOrWhiteSpace(cfg.HisApiKey))
+                client.DefaultRequestHeaders.Authorization = new("Bearer", cfg.HisApiKey);
+
+            var baseUrl = cfg.HisBaseUrl.TrimEnd('/');
+            var path = $"{baseUrl}/patients/{Uri.EscapeDataString(patientId ?? string.Empty)}/medications?includePast={includePast.ToString().ToLowerInvariant()}";
+            using var response = await client.GetAsync(path, ct).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                var raw = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                return JsonSerializer.Serialize(new
+                {
+                    patient_id = patientId,
+                    source = "his",
+                    prescriptions = JsonSerializer.Deserialize<JsonElement>(raw),
+                });
+            }
+        }
 
         var meds = new[]
         {
@@ -236,6 +288,6 @@ public sealed class GetMedicationScheduleTool : IAgentTool
         };
 
         var result = includePast ? meds : meds.Where(m => m.status == "active").ToArray();
-        return Task.FromResult(JsonSerializer.Serialize(new { patient_id = patientId, prescriptions = result }));
+        return JsonSerializer.Serialize(new { patient_id = patientId, source = "fixture", prescriptions = result });
     }
 }

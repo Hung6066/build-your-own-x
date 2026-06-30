@@ -21,23 +21,15 @@ public class AuditReportWorkflow
     [WorkflowRun]
     public async Task<AuditReportResult> RunAsync(AuditReportInput input)
     {
-        var actOpts = new ActivityOptions
-        {
-            StartToCloseTimeout = TimeSpan.FromMinutes(5),
-            RetryPolicy = new RetryPolicy
-            {
-                InitialInterval = TimeSpan.FromSeconds(3),
-                BackoffCoefficient = 2.0F,
-                MaximumInterval = TimeSpan.FromMinutes(2),
-                MaximumAttempts = 4,
-            },
-        };
+        var actOpts = WorkflowCommon.DefaultActivityOptions(TimeSpan.FromMinutes(5));
 
         Workflow.Logger.LogInformation(
             "Audit report workflow started. Type={Type} Period={Start}→{End}",
             input.ReportType, input.PeriodStart, input.PeriodEnd);
 
-        var reportId = $"AUDIT-{input.ReportType.ToUpperInvariant()}-{input.PeriodEnd:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
+        var reportId = await Workflow.ExecuteActivityAsync(
+            (ClinicalActivities a) => a.GenerateBusinessIdAsync(new BusinessIdActivityInput($"AUDIT-{input.ReportType.ToUpperInvariant()}", 8)),
+            actOpts);
 
         // ── Step 1: Collect & aggregate logs ────────────────────────────────
         status = "collecting-logs";
@@ -106,9 +98,13 @@ public class AuditReportWorkflow
         var exportCtx = new Dictionary<string, string>
         {
             ["report_id"] = reportId,
+            ["report_type"] = input.ReportType,
+            ["period_start"] = input.PeriodStart.ToString("O"),
+            ["period_end"] = input.PeriodEnd.ToString("O"),
             ["format"] = input.ExportFormat,
             ["narrative"] = narrativeResult.Output,
             ["anomalies"] = anomalyResult.Output,
+            ["metrics"] = collectResult.Output,
         };
         var exportResult = await Workflow.ExecuteActivityAsync(
             (ClinicalActivities a) => a.DispatchAgentAsync(
@@ -162,7 +158,7 @@ public class AuditReportWorkflow
     /// </summary>
     private static string ComputeIntegrityHash(string reportId, string content)
     {
-        var raw = $"{reportId}:{content}:{DateTimeOffset.UtcNow:O}";
+        var raw = $"{reportId}:{content}";
         var bytes = System.Text.Encoding.UTF8.GetBytes(raw);
         var hash = System.Security.Cryptography.SHA256.HashData(bytes);
         return Convert.ToHexString(hash).ToLowerInvariant();

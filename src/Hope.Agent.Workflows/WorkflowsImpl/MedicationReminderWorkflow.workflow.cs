@@ -23,22 +23,14 @@ public class MedicationReminderWorkflow
     [WorkflowRun]
     public async Task RunAsync(MedicationReminderInput input)
     {
-        var actOpts = new ActivityOptions
-        {
-            StartToCloseTimeout = TimeSpan.FromMinutes(1),
-            RetryPolicy = new RetryPolicy
-            {
-                InitialInterval = TimeSpan.FromSeconds(2),
-                BackoffCoefficient = 2.0F,
-                MaximumAttempts = 3,
-            },
-        };
+        var actOpts = WorkflowCommon.DefaultActivityOptions(TimeSpan.FromMinutes(1));
 
         Workflow.Logger.LogInformation(
             "Reminder workflow started for patient {Patient} medication {Med}",
             input.PatientId, input.MedicationName);
 
         var endAt = input.StartAt.AddDays(input.DurationDays);
+        var reminderId = input.ReminderId ?? $"REM-{input.PatientId:N}";
 
         // Reminder frequency depends on adherence risk score (mirrors AGENT_WORKFLOWS section 4.2)
         var remindersPerDose = input.AdherenceRiskScore switch
@@ -136,6 +128,7 @@ public class MedicationReminderWorkflow
                 confirmedCount++;
                 missedCount = 0; // reset consecutive miss count
                 status = "confirmed";
+                await PersistReminderStatusAsync(input, reminderId, status, actOpts, Workflow.UtcNow);
                 Workflow.Logger.LogInformation("Patient {Patient} confirmed {Med} dose #{Count}",
                     input.PatientId, input.MedicationName, confirmedCount);
             }
@@ -143,6 +136,7 @@ public class MedicationReminderWorkflow
             {
                 missedCount++;
                 status = $"missed-{missedCount}";
+                await PersistReminderStatusAsync(input, reminderId, status, actOpts, lastMissedAt: Workflow.UtcNow);
                 Workflow.Logger.LogWarning("Patient {Patient} missed {Med} dose. Consecutive misses: {Miss}",
                     input.PatientId, input.MedicationName, missedCount);
 
@@ -150,6 +144,13 @@ public class MedicationReminderWorkflow
                 if (missedCount >= 3)
                 {
                     await EscalateToCareTeamAsync(input, actOpts);
+                    await PersistReminderStatusAsync(
+                        input,
+                        reminderId,
+                        "escalated",
+                        actOpts,
+                        lastMissedAt: Workflow.UtcNow,
+                        escalationReason: $"Missed {input.MedicationName} 3 consecutive times");
                     missedCount = 0; // reset after escalation — don't spam every dose
                 }
             }
@@ -159,6 +160,7 @@ public class MedicationReminderWorkflow
         }
 
         status = "completed";
+        await PersistReminderStatusAsync(input, reminderId, status, actOpts);
         Workflow.Logger.LogInformation("Reminder workflow completed for patient {Patient} medication {Med}",
             input.PatientId, input.MedicationName);
     }
@@ -197,6 +199,44 @@ public class MedicationReminderWorkflow
             input.UserId, escalateMeta);
         return Workflow.ExecuteActivityAsync(
             (ClinicalActivities a) => a.NotifyAsync(escalateNotify),
+            actOpts);
+    }
+
+    private Task PersistReminderStatusAsync(
+        MedicationReminderInput input,
+        string reminderId,
+        string newStatus,
+        ActivityOptions actOpts,
+        DateTimeOffset? lastConfirmedAt = null,
+        DateTimeOffset? lastMissedAt = null,
+        string? escalationReason = null)
+    {
+        var ctx = new Dictionary<string, string>
+        {
+            ["reminder_id"] = reminderId,
+            ["status"] = newStatus,
+            ["confirmed_count"] = confirmedCount.ToString(),
+            ["missed_count"] = missedCount.ToString(),
+        };
+
+        if (lastConfirmedAt.HasValue)
+            ctx["last_confirmed_at"] = lastConfirmedAt.Value.ToString("O");
+        if (lastMissedAt.HasValue)
+            ctx["last_missed_at"] = lastMissedAt.Value.ToString("O");
+        if (!string.IsNullOrWhiteSpace(escalationReason))
+            ctx["escalation_reason"] = escalationReason;
+
+        var dispatch = new AgentDispatchInput(
+            input.UserId,
+            "update_reminder_status",
+            $"Update reminder {reminderId} status to {newStatus}",
+            ctx,
+            null,
+            null,
+            5);
+
+        return Workflow.ExecuteActivityAsync(
+            (ClinicalActivities a) => a.DispatchAgentAsync(dispatch),
             actOpts);
     }
 

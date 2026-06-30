@@ -38,9 +38,30 @@ public sealed class ToolApprovalOptions
     public int SandboxMaxOutputBytes { get; set; } = 256 * 1024;
 
     /// <summary>
+    /// When true, write/critical tools must carry an idempotency key in
+    /// <see cref="Hope.Agent.Application.Tools.ToolInvocationContext"/>.
+    /// </summary>
+    public bool RequireIdempotencyKeyForWrites { get; set; } = true;
+
+    /// <summary>
+    /// Maximum parallel calls allowed per tool process before the gateway rejects
+    /// new calls. Use external rate limits for cluster-wide enforcement.
+    /// </summary>
+    public int DefaultPerToolConcurrencyLimit { get; set; } = 25;
+
+    /// <summary>Per-tool concurrency override for hot or fragile external systems.</summary>
+    public Dictionary<string, int> PerToolConcurrencyLimit { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
     /// Per-tool impact mapping. Keys are tool names (case-insensitive).
     /// </summary>
     public Dictionary<string, ToolImpactLevel> Tools { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// When false, tools missing from <see cref="ToolRoleAccess"/> are denied by default.
+    /// Keep true in local development, set false in production.
+    /// </summary>
+    public bool AllowUnconfiguredToolAccess { get; set; } = true;
 
     /// <summary>
     /// Per-tool role allowlists (RBAC).  Keys are tool names (case-insensitive),

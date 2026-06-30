@@ -1,0 +1,197 @@
+{
+  "patients": [
+    {
+      "mrn": "MRN-2024-00123",
+      "fullName": "Nguyễn Văn A",
+      "dob": "1959-03-15",
+      "gender": "male",
+      "diagnosis": [
+        { "code": "E11.9", "system": "ICD-10", "name": "Type 2 diabetes mellitus without complications" },
+        { "code": "I10", "system": "ICD-10", "name": "Essential (primary) hypertension" }
+      ],
+      "medications": [
+        { "drug": "Metformin", "dose": "1000mg", "frequency": "BID", "route": "oral" },
+        { "drug": "Lisinopril", "dose": "10mg", "frequency": "QD", "route": "oral" }
+      ],
+      "allergies": ["Penicillin"],
+      "insurance": {
+        "provider": "Bảo hiểm Y tế Việt Nam",
+        "policyNumber": "BHYT-7934567890123",
+        "coveragePercent": 80,
+        "validUntil": "2026-12-31"
+      },
+      "lastVisit": "2026-05-15T08:30:00+07:00"
+    },
+    {
+      "mrn": "MRN-2024-00456",
+      "fullName": "Trần Thị B",
+      "dob": "1984-07-22",
+      "gender": "female",
+      "diagnosis": [
+        { "code": "K80.1", "system": "ICD-10", "name": "Calculus of gallbladder with other cholecystitis" }
+      ],
+      "medications": [
+        { "drug": "Ursodeoxycholic acid", "dose": "300mg", "frequency": "BID", "route": "oral" }
+      ],
+      "allergies": [],
+      "insurance": {
+        "provider": "Bảo hiểm Y tế Việt Nam",
+        "policyNumber": "BHYT-7912345678901",
+        "coveragePercent": 80,
+        "validUntil": "2026-09-30"
+      },
+      "lastVisit": "2026-06-01T14:00:00+07:00",
+      "surgery": {
+        "procedure": "Laparoscopic cholecystectomy",
+        "date": "2026-06-02",
+        "surgeon": "Dr. Lê Văn C",
+        "outcome": "successful"
+      }
+    },
+    {
+      "mrn": "MRN-2024-00789",
+      "fullName": "Phạm Văn D",
+      "dob": "1940-11-03",
+      "gender": "male",
+      "diagnosis": [
+        { "code": "I63.9", "system": "ICD-10", "name": "Cerebral infarction, unspecified" },
+        { "code": "E11.9", "system": "ICD-10", "name": "Type 2 diabetes mellitus" },
+        { "code": "I10", "system": "ICD-10", "name": "Hypertension" }
+      ],
+      "medications": [
+        { "drug": "Aspirin", "dose": "81mg", "frequency": "QD", "route": "oral" },
+        { "drug": "Atorvastatin", "dose": "40mg", "frequency": "QD", "route": "oral" },
+        { "drug": "Metformin", "dose": "500mg", "frequency": "BID", "route": "oral" }
+      ],
+      "allergies": ["Sulfa"],
+      "insurance": {
+        "provider": "Bảo hiểm Y tế Việt Nam",
+        "policyNumber": "BHYT-7956789012345",
+        "coveragePercent": 100,
+        "validUntil": "2026-12-31"
+      },
+      "lastVisit": "2026-06-03T10:00:00+07:00",
+      "emergencyContact": {
+        "name": "Nguyễn Thị E (con gái)",
+        "phone": "0912-345-678"
+      }
+    }
+  ],
+  "clinicalGuidelines": [
+    {
+      "id": "GL-DM-001",
+      "title": "Điều trị đái tháo đường type 2 ở người lớn",
+      "source": "Bộ Y Tế Việt Nam - Hướng dẫn chẩn đoán và điều trị đái tháo đường típ 2",
+      "year": 2024,
+      "recommendations": [
+        "HbA1c mục tiêu < 7.0% cho hầu hết bệnh nhân",
+        "Metformin là lựa chọn đầu tay nếu không có chống chỉ định",
+        "Kiểm soát huyết áp < 140/90 mmHg, ưu tiên < 130/80 nếu có bệnh thận",
+        "Tầm soát biến chứng mắt, thận, thần kinh hàng năm",
+        "HbA1c ≥ 8.0% khi đang dùng 2 thuốc → xem xét thêm insulin"
+      ]
+    },
+    {
+      "id": "GL-HT-001",
+      "title": "Quản lý tăng huyết áp",
+      "source": "ESC/ESH Guidelines 2024",
+      "year": 2024,
+      "recommendations": [
+        "Mục tiêu huyết áp < 140/90 mmHg",
+        "Ở bệnh nhân đái tháo đường: mục tiêu < 130/80 mmHg",
+        "Phối hợp thuốc ưu tiên: ACEi/ARB + CCB hoặc lợi tiểu",
+        "Theo dõi huyết áp tại nhà"
+      ]
+    }
+  ],
+  "drugFormulary": [
+    {
+      "name": "Metformin",
+      "class": "Biguanide",
+      "indications": ["Đái tháo đường type 2"],
+      "contraindications": ["Suy thận (eGFR < 30)", "Nhiễm toan lactic"],
+      "commonDose": "500-2000mg/ngày",
+      "sideEffects": ["Rối loạn tiêu hóa", "Tiêu chảy", "Buồn nôn"],
+      "costVnd": 150000
+    },
+    {
+      "name": "Lisinopril",
+      "class": "ACE Inhibitor",
+      "indications": ["Tăng huyết áp", "Suy tim", "Bệnh thận đái tháo đường"],
+      "contraindications": ["Phù mạch", "Hẹp động mạch thận 2 bên"],
+      "commonDose": "5-40mg/ngày",
+      "sideEffects": ["Ho khan", "Tăng kali máu", "Hạ huyết áp"],
+      "costVnd": 85000
+    },
+    {
+      "name": "Aspirin",
+      "class": "Antiplatelet",
+      "indications": ["Dự phòng thứ phát đột quỵ", "Bệnh mạch vành"],
+      "contraindications": ["Loét dạ dày tiến triển", "Xuất huyết não"],
+      "commonDose": "81-325mg/ngày",
+      "sideEffects": ["Xuất huyết tiêu hóa", "Ù tai"],
+      "costVnd": 30000
+    },
+    {
+      "name": "Atorvastatin",
+      "class": "Statin",
+      "indications": ["Rối loạn lipid máu", "Dự phòng tim mạch"],
+      "contraindications": ["Bệnh gan tiến triển", "Thai kỳ"],
+      "commonDose": "10-80mg/ngày",
+      "sideEffects": ["Đau cơ", "Tăng men gan"],
+      "costVnd": 120000
+    }
+  ],
+  "icd10Codes": [
+    { "code": "E11.9", "name": "Type 2 diabetes mellitus without complications", "category": "Endocrine" },
+    { "code": "I10", "name": "Essential (primary) hypertension", "category": "Circulatory" },
+    { "code": "K80.1", "name": "Calculus of gallbladder with other cholecystitis", "category": "Digestive" },
+    { "code": "I63.9", "name": "Cerebral infarction, unspecified", "category": "Circulatory" }
+  ],
+  "fhirSamples": {
+    "validPatient": {
+      "resourceType": "Patient",
+      "id": "pat-sample-001",
+      "identifier": [{ "system": "http://hope.hospital.com/mrn", "value": "MRN-2024-00123" }],
+      "name": [{ "family": "Nguyen", "given": ["Van", "A"] }],
+      "gender": "male",
+      "birthDate": "1959-03-15",
+      "telecom": [{ "system": "phone", "value": "0912-345-678" }]
+    },
+    "validObservation": {
+      "resourceType": "Observation",
+      "id": "obs-sample-001",
+      "status": "final",
+      "code": {
+        "coding": [
+          { "system": "http://loinc.org", "code": "4548-4", "display": "Hemoglobin A1c" }
+        ]
+      },
+      "subject": { "reference": "Patient/pat-sample-001" },
+      "effectiveDateTime": "2026-06-04T08:00:00+07:00",
+      "valueQuantity": { "value": 8.2, "unit": "%", "system": "http://unitsofmeasure.org" }
+    },
+    "validMedicationRequest": {
+      "resourceType": "MedicationRequest",
+      "id": "med-sample-001",
+      "status": "active",
+      "intent": "order",
+      "medicationCodeableConcept": {
+        "coding": [
+          { "system": "http://www.nlm.nih.gov/research/umls/rxnorm", "code": "6809", "display": "Metformin" }
+        ]
+      },
+      "subject": { "reference": "Patient/pat-sample-001" },
+      "dosageInstruction": [{
+        "text": "1000mg twice daily",
+        "timing": { "repeat": { "frequency": 2, "period": 1, "periodUnit": "d" } },
+        "doseAndRate": [{ "doseQuantity": { "value": 1000, "unit": "mg" } }]
+      }]
+    }
+  },
+  "prompts": {
+    "scheduling": "You are Hope, a clinical scheduling assistant for a Vietnamese hospital. Help schedule appointments based on patient needs, doctor availability, and urgency. Always confirm: patient MRN, preferred date/time, specialty, and reason for visit. Output in Vietnamese.",
+    "medical-summary": "You are Hope, a medical summarization specialist. Create concise, structured discharge summaries and clinical notes. Include: diagnosis (ICD-10 codes), procedures, medications on discharge, follow-up plan, and warning signs. Output in Vietnamese.",
+    "insurance": "You are Hope, an insurance verification specialist. Verify insurance coverage, estimate out-of-pocket costs, and flag any coverage limitations. Always cite the policy number and coverage percentage. Output in Vietnamese."
+  }
+}

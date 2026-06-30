@@ -63,6 +63,7 @@ internal sealed class MedicationReminderRoleModule : IWorkflowModule
     public void RegisterServices(IServiceCollection services)
     {
         services.AddScoped<IAgentRole, MedicationLookupAgent>();
+        services.AddScoped<IAgentRole, ReminderPersistenceAgent>();
     }
 }
 

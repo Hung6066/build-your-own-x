@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Hope.Agent.Application.Security;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
 namespace Hope.Agent.Infrastructure.Security;
@@ -19,7 +20,8 @@ namespace Hope.Agent.Infrastructure.Security;
 /// </summary>
 internal sealed class RedisRefreshTokenStore(
     IConnectionMultiplexer redis,
-    IConfiguration cfg) : IRefreshTokenStore
+    IConfiguration cfg,
+    IOptionsMonitor<DataPerimeterOptions> perimeter) : IRefreshTokenStore
 {
     // Lua: GET token JSON, DEL the token key, also write a short-lived "burned" marker
     // (a tombstone holding only the family pointer) so a later replay can be traced
@@ -58,8 +60,9 @@ internal sealed class RedisRefreshTokenStore(
             .Replace('+', '-')
             .Replace('/', '_');
 
-        var key = BuildKey(token);
-        var famKey = BuildFamilyKey(userId, familyId);
+        var prefix = perimeter.CurrentValue.RedisKeyPrefix;
+        var key = BuildKey(token, prefix);
+        var famKey = BuildFamilyKey(userId, familyId, prefix);
         var payload = JsonSerializer.Serialize(new StoredClaims(userId, subject, roles, familyId));
 
         var db = redis.GetDatabase();
@@ -79,7 +82,8 @@ internal sealed class RedisRefreshTokenStore(
             return null;
 
         var db = redis.GetDatabase();
-        var key = BuildKey(token);
+        var prefix = perimeter.CurrentValue.RedisKeyPrefix;
+        var key = BuildKey(token, prefix);
 
         // We need the family id before calling Lua so we can pass the family key.
         // Two-step: peek payload, then run Lua. Race is acceptable because Lua
@@ -94,11 +98,11 @@ internal sealed class RedisRefreshTokenStore(
         if (stored is null) return null;
 
         var burnedPayload = JsonSerializer.Serialize(stored);
-        var famKey = BuildFamilyKey(stored.UserId, stored.FamilyId);
+        var famKey = BuildFamilyKey(stored.UserId, stored.FamilyId, prefix);
 
         var result = await db.ScriptEvaluateAsync(
             GetDelBurnLua,
-            keys: [new RedisKey(key), new RedisKey(BuildBurnedKey(token)), new RedisKey(famKey)],
+            keys: [new RedisKey(key), new RedisKey(BuildBurnedKey(token, prefix)), new RedisKey(famKey)],
             values: [burnedPayload, (RedisValue)(long)Ttl.TotalSeconds]);
 
         if (result.IsNull) return null;
@@ -110,7 +114,7 @@ internal sealed class RedisRefreshTokenStore(
     {
         if (string.IsNullOrWhiteSpace(token)) return null;
         var db = redis.GetDatabase();
-        var raw = (string?)await db.StringGetAsync(BuildBurnedKey(token));
+        var raw = (string?)await db.StringGetAsync(BuildBurnedKey(token, perimeter.CurrentValue.RedisKeyPrefix));
         if (raw is null) return null;
         try
         {
@@ -123,7 +127,7 @@ internal sealed class RedisRefreshTokenStore(
     public async Task RevokeFamilyAsync(Guid userId, Guid familyId, CancellationToken ct)
     {
         var db = redis.GetDatabase();
-        var famKey = BuildFamilyKey(userId, familyId);
+        var famKey = BuildFamilyKey(userId, familyId, perimeter.CurrentValue.RedisKeyPrefix);
         var members = await db.SetMembersAsync(famKey);
         if (members.Length > 0)
         {
@@ -138,24 +142,26 @@ internal sealed class RedisRefreshTokenStore(
     {
         if (string.IsNullOrWhiteSpace(token)) return;
         var db = redis.GetDatabase();
-        await db.KeyDeleteAsync(BuildKey(token));
+        await db.KeyDeleteAsync(BuildKey(token, perimeter.CurrentValue.RedisKeyPrefix));
     }
 
     // Hash the raw token before using it as a Redis key.
-    private static string BuildKey(string token)
+    private static string BuildKey(string token, string prefix)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
-        return $"rt:{Convert.ToHexString(hash).ToLowerInvariant()}";
+        return $"{NormalizePrefix(prefix)}:rt:{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
 
-    private static string BuildBurnedKey(string token)
+    private static string BuildBurnedKey(string token, string prefix)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(token));
-        return $"rt-burned:{Convert.ToHexString(hash).ToLowerInvariant()}";
+        return $"{NormalizePrefix(prefix)}:rt-burned:{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
 
-    private static string BuildFamilyKey(Guid userId, Guid familyId)
-        => $"rt-fam:{userId:N}:{familyId:N}";
+    private static string BuildFamilyKey(Guid userId, Guid familyId, string prefix)
+        => $"{NormalizePrefix(prefix)}:rt-fam:{userId:N}:{familyId:N}";
+
+    private static string NormalizePrefix(string? prefix) => string.IsNullOrWhiteSpace(prefix) ? "hope" : prefix.Trim(':');
 
     private sealed record StoredClaims(Guid UserId, string Subject, string[] Roles, Guid FamilyId);
 }

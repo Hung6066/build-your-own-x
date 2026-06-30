@@ -4,6 +4,7 @@ using Hope.Agent.Application.Security;
 using Hope.Agent.Application.Tools;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -21,15 +22,46 @@ namespace Hope.Agent.AgentRuntime.Security;
 /// </summary>
 public sealed class SandboxedToolExecutor(
     IOptionsMonitor<ToolApprovalOptions> opts,
+    IOptionsMonitor<RuntimeSandboxOptions> sandboxOptions,
     IPromptShield outputRail,
     IToolResultCache toolCache,
-    ILogger<SandboxedToolExecutor> log)
+    ILogger<SandboxedToolExecutor> log) : IToolExecutor
 {
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> ToolSemaphores = new(StringComparer.OrdinalIgnoreCase);
+
     public async Task<string> InvokeAsync(IAgentTool tool, string argumentsJson, ToolInvocationContext context, CancellationToken ct)
     {
         var currentOptions = opts.CurrentValue;
+        var sandbox = sandboxOptions.CurrentValue;
         var maxArgBytes = Math.Max(1_024, currentOptions.SandboxMaxArgumentsBytes);
         var maxOutputBytes = Math.Max(4_096, currentOptions.SandboxMaxOutputBytes);
+        var impact = currentOptions.Tools.TryGetValue(tool.Definition.Name, out var configuredImpact)
+            ? configuredImpact
+            : currentOptions.DefaultImpact;
+
+        if (sandbox.KillSwitch.TryGetValue(tool.Definition.Name, out var disabled) && disabled)
+        {
+            HopeMeters.BlockedToolCalls.Add(1, new("tool", tool.Definition.Name), new("reason", "kill_switch"));
+            throw new InvalidOperationException($"Tool '{tool.Definition.Name}' is disabled by runtime sandbox kill switch.");
+        }
+
+        if (currentOptions.RequireIdempotencyKeyForWrites
+            && impact is Hope.Agent.Domain.Security.ToolImpactLevel.Write or Hope.Agent.Domain.Security.ToolImpactLevel.Critical
+            && string.IsNullOrWhiteSpace(context.IdempotencyKey))
+        {
+            HopeMeters.ToolErrors.Add(1,
+                new KeyValuePair<string, object?>("tool", tool.Definition.Name),
+                new KeyValuePair<string, object?>("reason", "missing_idempotency_key"));
+            throw new InvalidOperationException($"Tool '{tool.Definition.Name}' requires an idempotency key for write/critical invocation.");
+        }
+
+        if (sandbox.RequireIsolationForWriteTools
+            && impact is Hope.Agent.Domain.Security.ToolImpactLevel.Write or Hope.Agent.Domain.Security.ToolImpactLevel.Critical
+            && string.Equals(sandbox.Mode, "in-process", StringComparison.OrdinalIgnoreCase))
+        {
+            HopeMeters.BlockedToolCalls.Add(1, new("tool", tool.Definition.Name), new("reason", "sandbox_isolation_required"));
+            throw new InvalidOperationException($"Tool '{tool.Definition.Name}' requires isolated-process/container sandbox execution.");
+        }
 
         // ── LLM07: validate args are a well-formed JSON object ────────────────
         // Prevents malformed / crafted payloads from crashing tool implementations
@@ -49,6 +81,8 @@ public sealed class SandboxedToolExecutor(
                 throw new ArgumentException(
                     $"Tool '{tool.Definition.Name}': argumentsJson must be a JSON object, got {doc.RootElement.ValueKind}.");
             }
+
+            ValidateSchema(tool, doc.RootElement);
         }
         catch (JsonException ex)
         {
@@ -88,6 +122,19 @@ public sealed class SandboxedToolExecutor(
                 HopeMeters.ToolCacheHits.Add(1, new KeyValuePair<string, object?>("tool", tool.Definition.Name));
                 return cached;
             }
+        }
+
+        var concurrencyLimit = currentOptions.PerToolConcurrencyLimit.TryGetValue(tool.Definition.Name, out var configuredLimit)
+            ? configuredLimit
+            : currentOptions.DefaultPerToolConcurrencyLimit;
+        concurrencyLimit = Math.Clamp(concurrencyLimit, 1, 10_000);
+        var semaphore = ToolSemaphores.GetOrAdd(tool.Definition.Name, _ => new SemaphoreSlim(concurrencyLimit, concurrencyLimit));
+        if (!await semaphore.WaitAsync(TimeSpan.FromMilliseconds(250), cts.Token).ConfigureAwait(false))
+        {
+            HopeMeters.ToolErrors.Add(1,
+                new KeyValuePair<string, object?>("tool", tool.Definition.Name),
+                new KeyValuePair<string, object?>("reason", "tool_rate_limited"));
+            throw new InvalidOperationException($"Tool '{tool.Definition.Name}' is currently rate limited by the tool gateway.");
         }
 
         try
@@ -136,6 +183,99 @@ public sealed class SandboxedToolExecutor(
                 new KeyValuePair<string, object?>("reason", "sandbox_timeout"));
             throw new TimeoutException($"Tool '{tool.Definition.Name}' exceeded sandbox timeout of {timeoutMs}ms");
         }
+        finally
+        {
+            semaphore.Release();
+        }
+    }
+
+    private static void ValidateSchema(IAgentTool tool, JsonElement args)
+    {
+        try
+        {
+            using var schema = JsonDocument.Parse(tool.Definition.ParametersJsonSchema);
+            if (!schema.RootElement.TryGetProperty("required", out var required)
+                || required.ValueKind != JsonValueKind.Array)
+            {
+                return;
+            }
+
+            var missing = required.EnumerateArray()
+                .Select(x => x.GetString())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Where(name => !args.TryGetProperty(name!, out var value)
+                    || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined
+                    || (value.ValueKind == JsonValueKind.String && string.IsNullOrWhiteSpace(value.GetString())))
+                .ToArray();
+
+            if (missing.Length > 0)
+            {
+                throw new ArgumentException(
+                    $"Tool '{tool.Definition.Name}' missing required argument(s): {string.Join(", ", missing)}.");
+            }
+
+            if (schema.RootElement.TryGetProperty("additionalProperties", out var additional)
+                && additional.ValueKind == JsonValueKind.False
+                && schema.RootElement.TryGetProperty("properties", out var strictProps)
+                && strictProps.ValueKind == JsonValueKind.Object)
+            {
+                var allowed = strictProps.EnumerateObject().Select(p => p.Name).ToHashSet(StringComparer.Ordinal);
+                var unknown = args.EnumerateObject().Select(p => p.Name).Where(name => !allowed.Contains(name)).ToArray();
+                if (unknown.Length > 0)
+                    throw new ArgumentException($"Tool '{tool.Definition.Name}' unknown argument(s): {string.Join(", ", unknown)}.");
+            }
+
+            if (!schema.RootElement.TryGetProperty("properties", out var properties)
+                || properties.ValueKind != JsonValueKind.Object)
+            {
+                return;
+            }
+
+            foreach (var prop in properties.EnumerateObject())
+            {
+                if (!args.TryGetProperty(prop.Name, out var value) || value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                    continue;
+
+                if (prop.Value.TryGetProperty("enum", out var enumValues) && enumValues.ValueKind == JsonValueKind.Array)
+                {
+                    var actual = value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText();
+                    var allowed = enumValues.EnumerateArray()
+                        .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : x.GetRawText())
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (actual is not null && !allowed.Contains(actual))
+                        throw new ArgumentException($"Tool '{tool.Definition.Name}' argument '{prop.Name}' is not one of the allowed enum values.");
+                }
+
+                if (!prop.Value.TryGetProperty("type", out var typeElement))
+                    continue;
+
+                var expectedTypes = typeElement.ValueKind == JsonValueKind.Array
+                    ? typeElement.EnumerateArray().Select(x => x.GetString()).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray()
+                    : [typeElement.GetString()];
+                if (!expectedTypes.Any(t => MatchesJsonSchemaType(value, t)))
+                    throw new ArgumentException($"Tool '{tool.Definition.Name}' argument '{prop.Name}' has invalid type '{value.ValueKind}'.");
+            }
+        }
+        catch (JsonException)
+        {
+            // A malformed schema is a tool authoring problem. Do not block runtime use;
+            // individual tools still validate by reading their required arguments.
+        }
+    }
+
+    private static bool MatchesJsonSchemaType(JsonElement value, string? expected)
+    {
+        return expected switch
+        {
+            "string" => value.ValueKind == JsonValueKind.String,
+            "number" => value.ValueKind == JsonValueKind.Number,
+            "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out _),
+            "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
+            "object" => value.ValueKind == JsonValueKind.Object,
+            "array" => value.ValueKind == JsonValueKind.Array,
+            "null" => value.ValueKind == JsonValueKind.Null,
+            _ => true,
+        };
     }
 
     private static string TruncateUtf8(string value, int maxBytes)

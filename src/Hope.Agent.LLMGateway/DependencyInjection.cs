@@ -27,7 +27,7 @@ public static class DependencyInjection
 
         AddOpenAICompat(services, "openai", options.OpenAI, isEmbedding: true);
         AddOpenAICompat(services, "qwen", options.Qwen, isEmbedding: true);
-        AddOpenAICompat(services, "ollama", options.Ollama, isEmbedding: false);
+        AddOpenAICompat(services, "ollama", options.Ollama, isEmbedding: true);
 
         services.AddHttpClient<AnthropicProvider>((sp, c) => AnthropicProvider.Configure(c, options.Anthropic))
             .AddStandardResilienceHandler(ConfigureResilience);

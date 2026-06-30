@@ -42,6 +42,7 @@ public interface IEvaluationHarness
 {
     Task<EvalRun> RunSuiteAsync(string suiteName, CancellationToken ct);
     Task<IReadOnlyList<EvalRun>> RecentRunsAsync(int take, CancellationToken ct);
+    Task<EvalMetricSummary> GetMetricsAsync(string suite, int days, CancellationToken ct);
 
     /// <summary>
     /// Returns score-over-time for a suite. Each point includes a delta vs the previous run
@@ -80,6 +81,18 @@ public sealed record EvalTrendPoint(
     double AvgScore,
     /// <summary>Change in AvgScore vs the immediately preceding run. Null for the first data point.</summary>
     double? DeltaScore);
+
+public sealed record EvalMetricSummary(
+    string Suite,
+    int Runs,
+    int TotalCases,
+    double TaskSuccessRate,
+    double HallucinationRate,
+    double ToolCallAccuracy,
+    double Faithfulness,
+    double AvgJudgeScore,
+    double LatencyP95Ms,
+    double CostPerSuccessUsd);
 
 /// <summary>CRUD store for DB-backed evaluation test cases.</summary>
 public interface IEvalCaseStore

@@ -519,7 +519,7 @@ public sealed class RankTriagePatientsTool : IAgentTool
 ///   - refill_rate: token/phút
 ///   - current    : token hiện tại (truyền vào từ caller hoặc mặc định = capacity)
 /// </summary>
-public sealed class ThrottleNotificationsTool : IAgentTool
+public sealed class ThrottleNotificationsTool(INotificationRateLimiter? rateLimiter = null) : IAgentTool
 {
     public ToolDefinition Definition { get; } = new(
         "throttle_notifications",
@@ -565,7 +565,7 @@ public sealed class ThrottleNotificationsTool : IAgentTool
         ["in_app"] = (50, 20),
     };
 
-    public Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
+    public async Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
     {
         var args = JsonDocument.Parse(argumentsJson).RootElement;
 
@@ -597,8 +597,30 @@ public sealed class ThrottleNotificationsTool : IAgentTool
             var urgency = n.GetProperty("urgency").GetString()!;
 
             var bucketKey = $"{patId}:{channel}";
+            var cfg = config.TryGetValue(channel, out var configured) ? configured : (5, 2);
+
+            if (rateLimiter is not null)
+            {
+                var persistedDecision = await rateLimiter.DecideAsync(
+                    new NotificationRateLimitRequest(patId, channel, urgency, cfg.Item1, cfg.Item2),
+                    ct).ConfigureAwait(false);
+
+                results.Add(new
+                {
+                    notification_id = notifId,
+                    patient_id = patId,
+                    channel,
+                    urgency,
+                    decision = persistedDecision.Decision,
+                    reason = persistedDecision.Reason,
+                    tokens_remaining = persistedDecision.TokensRemaining,
+                    state = "persistent",
+                });
+                continue;
+            }
+
             if (!buckets.TryGetValue(bucketKey, out _))
-                buckets[bucketKey] = config.TryGetValue(channel, out var cfg) ? cfg.Capacity : 5;
+                buckets[bucketKey] = cfg.Item1;
 
             int tokens = buckets[bucketKey];
             string decision;
@@ -643,12 +665,13 @@ public sealed class ThrottleNotificationsTool : IAgentTool
         var delayCount = results.Count(r => ((dynamic)r).decision == "delay");
         var dropCount = results.Count(r => ((dynamic)r).decision == "drop");
 
-        return Task.FromResult(JsonSerializer.Serialize(new
+        return JsonSerializer.Serialize(new
         {
             decisions = results,
             summary = new { sent = sentCount, delayed = delayCount, dropped = dropCount },
             algorithm = "token-bucket",
+            state = rateLimiter is null ? "per-invocation" : "persistent",
             processed_at = DateTimeOffset.UtcNow.ToString("O"),
-        }));
+        });
     }
 }

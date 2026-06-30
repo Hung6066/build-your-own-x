@@ -22,18 +22,7 @@ public class PatientAdmissionWorkflow
     [WorkflowRun]
     public async Task<PatientAdmissionResult> RunAsync(PatientAdmissionInput input)
     {
-        var defaultRetry = new RetryPolicy
-        {
-            InitialInterval = TimeSpan.FromSeconds(2),
-            BackoffCoefficient = 2.0F,
-            MaximumInterval = TimeSpan.FromMinutes(1),
-            MaximumAttempts = 5,
-        };
-        var actOpts = new ActivityOptions
-        {
-            StartToCloseTimeout = TimeSpan.FromMinutes(2),
-            RetryPolicy = defaultRetry,
-        };
+        var actOpts = WorkflowCommon.DefaultActivityOptions();
 
         Workflow.Logger.LogInformation("Admission workflow started for patient {Patient}", input.PatientId);
         status = "verifying-insurance";

@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using Hope.Agent.Application.Abstractions;
+using Hope.Agent.Application.Security;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
@@ -25,13 +26,15 @@ public sealed class EmbeddingCacheOptions
 /// </summary>
 internal sealed class RedisEmbeddingCache(
     IConnectionMultiplexer redis,
-    IOptions<EmbeddingCacheOptions> opts) : IEmbeddingCache
+    IOptions<EmbeddingCacheOptions> opts,
+    IOptionsMonitor<DataPerimeterOptions> perimeter) : IEmbeddingCache
 {
-    private static string CacheKey(string text)
+    private string CacheKey(string text)
     {
         Span<byte> hash = stackalloc byte[32];
         SHA256.HashData(Encoding.UTF8.GetBytes(text), hash);
-        return $"emb:v1:{Convert.ToHexString(hash)[..32]}";
+        var prefix = string.IsNullOrWhiteSpace(perimeter.CurrentValue.RedisKeyPrefix) ? "hope" : perimeter.CurrentValue.RedisKeyPrefix.Trim(':');
+        return $"{prefix}:emb:v1:{Convert.ToHexString(hash)[..32]}";
     }
 
     public async ValueTask<ReadOnlyMemory<float>?> GetAsync(string text, CancellationToken ct)

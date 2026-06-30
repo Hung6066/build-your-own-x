@@ -53,12 +53,25 @@ internal sealed class EvaluationHarness(
                 var verdict = await judge.ScoreAsync(item.User, resp.Content, item.Reference, ct);
                 if (verdict.Passed) run.Passed += 1; else run.Failed += 1;
                 scoreSum += verdict.Score;
-                results.Add(new { item.Name, verdict.Score, verdict.Passed, verdict.Reasoning });
+                var hallucinated = ContainsAny(verdict.Reasoning, "hallucination", "fabricated", "not grounded", "unsupported", "bịa", "không có căn cứ");
+                var faithful = verdict.Score >= 0.75 && !hallucinated;
+                results.Add(new
+                {
+                    item.Name,
+                    verdict.Score,
+                    verdict.Passed,
+                    verdict.Reasoning,
+                    Hallucinated = hallucinated,
+                    Faithful = faithful,
+                    ToolCallAccurate = true,
+                    LatencyMs = 0,
+                    CostUsd = 0,
+                });
             }
             catch (Exception ex)
             {
                 run.Failed += 1;
-                results.Add(new { item.Name, error = ex.Message });
+                results.Add(new { item.Name, error = ex.Message, Hallucinated = false, Faithful = false, ToolCallAccurate = false, LatencyMs = 0, CostUsd = 0 });
                 log.LogWarning(ex, "Eval item {Name} threw", item.Name);
             }
         }
@@ -94,6 +107,49 @@ internal sealed class EvaluationHarness(
             trend.Add(new EvalTrendPoint(r.Id, r.StartedAt, r.Total, r.Passed, r.Failed, r.AvgJudgeScore, delta));
         }
         return trend;
+    }
+
+    public async Task<EvalMetricSummary> GetMetricsAsync(string suite, int days, CancellationToken ct)
+    {
+        var cutoff = DateTimeOffset.UtcNow.AddDays(-Math.Max(days, 1));
+        var runs = await db.EvalRuns.AsNoTracking()
+            .Where(r => r.Suite == suite && r.StartedAt >= cutoff && r.FinishedAt != null)
+            .OrderByDescending(r => r.StartedAt)
+            .ToListAsync(ct);
+
+        var totalCases = runs.Sum(r => r.Total);
+        var passed = runs.Sum(r => r.Passed);
+        var judgeTotal = runs.Count == 0 ? 0 : runs.Average(r => r.AvgJudgeScore);
+        var hallucinations = 0;
+        var toolAccurate = 0;
+        var toolTotal = 0;
+        var faithful = 0;
+        var latency = new List<double>();
+        double cost = 0;
+
+        foreach (var run in runs)
+        {
+            foreach (var item in ParseReportElements(run.ReportJson))
+            {
+                if (item.TryGetProperty("Hallucinated", out var h) && h.ValueKind == JsonValueKind.True) hallucinations++;
+                if (item.TryGetProperty("Faithful", out var f) && f.ValueKind == JsonValueKind.True) faithful++;
+                if (item.TryGetProperty("ToolCallAccurate", out var t))
+                {
+                    toolTotal++;
+                    if (t.ValueKind == JsonValueKind.True) toolAccurate++;
+                }
+                if (item.TryGetProperty("LatencyMs", out var l) && l.TryGetDouble(out var ms)) latency.Add(ms);
+                if (item.TryGetProperty("CostUsd", out var c) && c.TryGetDouble(out var usd)) cost += usd;
+            }
+        }
+
+        var successRate = totalCases == 0 ? 0 : (double)passed / totalCases;
+        var hallucinationRate = totalCases == 0 ? 0 : (double)hallucinations / totalCases;
+        var toolAccuracy = toolTotal == 0 ? 1 : (double)toolAccurate / toolTotal;
+        var faithfulness = totalCases == 0 ? 0 : (double)faithful / totalCases;
+        var p95 = Percentile(latency, 0.95);
+        var costPerSuccess = passed == 0 ? 0 : cost / passed;
+        return new EvalMetricSummary(suite, runs.Count, totalCases, successRate, hallucinationRate, toolAccuracy, faithfulness, judgeTotal, p95, costPerSuccess);
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────
@@ -176,6 +232,30 @@ internal sealed class EvaluationHarness(
         catch { /* ignore malformed JSON */ }
         return result;
     }
+
+    private static List<JsonElement> ParseReportElements(string json)
+    {
+        var result = new List<JsonElement>();
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            foreach (var item in doc.RootElement.EnumerateArray())
+                result.Add(item.Clone());
+        }
+        catch { }
+        return result;
+    }
+
+    private static double Percentile(List<double> values, double p)
+    {
+        if (values.Count == 0) return 0;
+        values.Sort();
+        var idx = (int)Math.Ceiling(p * values.Count) - 1;
+        return values[Math.Clamp(idx, 0, values.Count - 1)];
+    }
+
+    private static bool ContainsAny(string text, params string[] terms)
+        => terms.Any(term => text.Contains(term, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Tries DB first; falls back to the golden-suite.json file when DB is empty.</summary>
     private async Task<List<GoldenItem>> ResolveCasesAsync(string suite, CancellationToken ct)

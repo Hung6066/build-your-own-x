@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Hope.Agent.Application.Security;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using StackExchange.Redis;
 
 namespace Hope.Agent.Infrastructure.Security;
@@ -20,7 +21,8 @@ namespace Hope.Agent.Infrastructure.Security;
 /// </summary>
 internal sealed class RedisIdempotencyStore(
     IConnectionMultiplexer redis,
-    IConfiguration cfg) : IIdempotencyStore
+    IConfiguration cfg,
+    IOptionsMonitor<DataPerimeterOptions> perimeter) : IIdempotencyStore
 {
     // 60 s pending window — handler must complete or crash within this; on crash
     // the record auto-expires so retries are not blocked indefinitely.
@@ -32,7 +34,7 @@ internal sealed class RedisIdempotencyStore(
     public async Task<IdempotencyDecision> TryBeginAsync(
         string key, Guid userId, string requestBodyHash, CancellationToken ct)
     {
-        var redisKey = BuildKey(key, userId);
+        var redisKey = BuildKey(key, userId, perimeter.CurrentValue.RedisKeyPrefix);
         var db = redis.GetDatabase();
         var nowSec = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var pendingValue = $"P|{requestBodyHash}|{nowSec}";
@@ -83,7 +85,7 @@ internal sealed class RedisIdempotencyStore(
     public async Task CompleteAsync(
         string key, Guid userId, int status, string requestBodyHash, byte[] responseBody, CancellationToken ct)
     {
-        var redisKey = BuildKey(key, userId);
+        var redisKey = BuildKey(key, userId, perimeter.CurrentValue.RedisKeyPrefix);
         var db = redis.GetDatabase();
         // Cap stored response at 256 KB — anything larger is not cached; the slot is
         // simply released so retries re-execute. Prevents Redis memory exhaustion.
@@ -99,15 +101,17 @@ internal sealed class RedisIdempotencyStore(
     public async Task AbortAsync(string key, Guid userId, CancellationToken ct)
     {
         var db = redis.GetDatabase();
-        await db.KeyDeleteAsync(BuildKey(key, userId));
+        await db.KeyDeleteAsync(BuildKey(key, userId, perimeter.CurrentValue.RedisKeyPrefix));
     }
 
-    private static string BuildKey(string clientKey, Guid userId)
+    private static string BuildKey(string clientKey, Guid userId, string prefix)
     {
         // Namespace per user so two users can independently use the same key value
         // without colliding; hash so raw client keys never appear in Redis.
         var raw = $"{userId:N}:{clientKey}";
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(raw));
-        return $"idem:{Convert.ToHexString(hash).ToLowerInvariant()}";
+        return $"{NormalizePrefix(prefix)}:idem:{Convert.ToHexString(hash).ToLowerInvariant()}";
     }
+
+    private static string NormalizePrefix(string? prefix) => string.IsNullOrWhiteSpace(prefix) ? "hope" : prefix.Trim(':');
 }

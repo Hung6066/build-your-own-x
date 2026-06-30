@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Hope.Agent.Application.LLM;
 using Hope.Agent.Application.Tools;
+using Hope.Agent.Application.Workflows;
 
 namespace Hope.Agent.Tools;
 
@@ -188,7 +189,7 @@ public sealed class DetectAuditAnomaliesTool : IAgentTool
 
 // ── Report Export & Signing ───────────────────────────────────────────────────
 
-public sealed class ExportAuditReportTool : IAgentTool
+public sealed class ExportAuditReportTool(IAuditReportStore reportStore) : IAgentTool
 {
     public ToolDefinition Definition { get; } = new(
         "export_audit_report",
@@ -207,34 +208,82 @@ public sealed class ExportAuditReportTool : IAgentTool
         }
         """);
 
-    public Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
+    public async Task<string> InvokeAsync(string argumentsJson, ToolInvocationContext context, CancellationToken ct)
     {
         var args = JsonDocument.Parse(argumentsJson).RootElement;
         var reportId = args.GetProperty("report_id").GetString() ?? "UNKNOWN";
         var narrative = args.GetProperty("narrative").GetString() ?? string.Empty;
         var format = args.TryGetProperty("format", out var f) ? f.GetString() ?? "json" : "json";
+        var reportType = args.TryGetProperty("report_type", out var rt) ? rt.GetString() ?? "operational" : "operational";
+        var periodStart = args.TryGetProperty("period_start", out var ps)
+            && DateTimeOffset.TryParse(ps.GetString(), out var parsedStart)
+                ? parsedStart
+                : (DateTimeOffset?)null;
+        var periodEnd = args.TryGetProperty("period_end", out var pe)
+            && DateTimeOffset.TryParse(pe.GetString(), out var parsedEnd)
+                ? parsedEnd
+                : (DateTimeOffset?)null;
+        var anomaliesJson = args.TryGetProperty("anomalies_json", out var a) ? a.GetString() : null;
+        var metricsJson = args.TryGetProperty("metrics_json", out var m) ? m.GetString() : null;
+        var exportedAt = DateTimeOffset.UtcNow;
+        var exportPath = $"/reports/{reportId}.{format}";
 
         var content = JsonSerializer.Serialize(new
         {
             report_id = reportId,
             narrative,
-            anomalies = args.TryGetProperty("anomalies_json", out var a) ? a.GetString() : null,
-            metrics = args.TryGetProperty("metrics_json", out var m) ? m.GetString() : null,
-            exported_at = DateTimeOffset.UtcNow.ToString("O"),
+            anomalies = anomaliesJson,
+            metrics = metricsJson,
+            exported_at = exportedAt.ToString("O"),
             exported_by = context.UserId.ToString(),
         });
 
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+        var byteSize = Encoding.UTF8.GetByteCount(content);
 
-        return Task.FromResult(JsonSerializer.Serialize(new
+        await reportStore.SaveAsync(new AuditReportWrite(
+            ReportId: reportId,
+            RequestedBy: context.UserId,
+            ReportType: reportType,
+            PeriodStart: periodStart,
+            PeriodEnd: periodEnd,
+            Narrative: narrative,
+            MetricsJson: NormalizeJsonOrNull(metricsJson),
+            AnomaliesJson: NormalizeJsonOrNull(anomaliesJson),
+            Format: format,
+            ExportPath: exportPath,
+            IntegrityHash: hash,
+            ByteSize: byteSize,
+            SigningAlgorithm: "SHA-256",
+            ExportedAt: exportedAt,
+            Status: "exported",
+            CorrelationId: context.CorrelationId), ct).ConfigureAwait(false);
+
+        return JsonSerializer.Serialize(new
         {
             report_id = reportId,
             format,
-            export_path = $"/reports/{reportId}.{format}",
+            export_path = exportPath,
             integrity_hash = hash,
-            byte_size = Encoding.UTF8.GetByteCount(content),
-            exported_at = DateTimeOffset.UtcNow.ToString("O"),
+            byte_size = byteSize,
+            exported_at = exportedAt.ToString("O"),
             signing_algorithm = "SHA-256",
-        }));
+        });
+    }
+
+    private static string? NormalizeJsonOrNull(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.GetRawText();
+        }
+        catch
+        {
+            return JsonSerializer.Serialize(new { raw = json });
+        }
     }
 }

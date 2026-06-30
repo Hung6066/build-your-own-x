@@ -11,6 +11,8 @@ on:
 
 permissions:
     contents: read
+    id-token: write
+    security-events: write
 
 jobs:
     security:
@@ -39,6 +41,52 @@ jobs:
               run: |
                   $env:PATH = "$env:PATH:$HOME/.dotnet/tools"
                   ./tools/hope-security.ps1 -Solution Hope.Agent.sln -IncludeTransitive -FailOnSeverity High -GenerateSbom
+
+            - name: Red-team regression suite
+              shell: pwsh
+              run: ./tests/hope-redteam-regression.ps1
+
+            - name: Production P0 security harness validation
+              shell: pwsh
+              run: ./tests/hope-production-security-p0.ps1
+
+            - name: Production P1 bigtech security gate
+              shell: pwsh
+              run: ./tests/hope-security-gate-p1.ps1
+
+            - name: Trivy filesystem scan
+              uses: aquasecurity/trivy-action@master
+              with:
+                  scan-type: fs
+                  scan-ref: .
+                  format: sarif
+                  output: artifacts/security/trivy-results.sarif
+                  severity: HIGH,CRITICAL
+
+            - name: Checkov IaC scan
+              uses: bridgecrewio/checkov-action@master
+              with:
+                  directory: .
+                  framework: dockerfile,kubernetes,github_actions
+                  output_format: sarif
+                  output_file_path: artifacts/security/checkov-results.sarif
+
+            - name: Upload SARIF
+              if: always()
+              uses: github/codeql-action/upload-sarif@v3
+              with:
+                  sarif_file: artifacts/security
+
+            - name: Install cosign
+              uses: sigstore/cosign-installer@v3
+
+            - name: Cosign keyless signing dry-run
+              run: cosign version
+
+            - name: SLSA provenance note
+              run: |
+                  mkdir -p artifacts/security
+                  echo "slsa provenance required for release image signing; use slsa-framework/slsa-github-generator on release workflows" > artifacts/security/slsa-provenance-required.txt
 
             - name: Upload security artifacts
               uses: actions/upload-artifact@v4

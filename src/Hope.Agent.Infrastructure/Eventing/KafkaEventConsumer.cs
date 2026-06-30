@@ -20,10 +20,10 @@ public sealed class KafkaEventConsumer(KafkaOptions options) : IEventConsumer
             AutoOffsetReset = AutoOffsetReset.Earliest,
             EnablePartitionEof = false,
             SessionTimeoutMs = 10_000,
-            // Suppress librdkafka native stderr logs — connection retries are
-            // handled by the worker loop and logged via ILogger instead.
-            Debug = string.Empty,
+            // Do NOT set Debug = string.Empty — librdkafka rejects empty string.
+            // Omit the property entirely to use the default (no debug output).
         };
+        KafkaEventPublisher.ApplySecurity(config, options);
         using var consumer = new ConsumerBuilder<string, string>(config)
             .SetLogHandler((_, _) => { }) // swallow native log output
             .Build();

@@ -105,22 +105,49 @@ public static class WorkflowEndpoints
         grp.MapPost("/reminders", async (
             [FromBody] StartReminderRequest req,
             [FromServices] IWorkflowDispatcher dispatcher,
+            [FromServices] IReminderRecordStore reminderStore,
             ClaimsPrincipal user,
+            HttpContext http,
             CancellationToken ct) =>
         {
             var userId = ResolveUserId(user);
+            var reminderId = $"REM-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.CreateVersion7().ToString("N")[..8].ToUpperInvariant()}";
+            var startAt = req.StartAt ?? DateTimeOffset.UtcNow.AddHours(1);
             var input = new MedicationReminderInput(
                 PatientId: req.PatientId,
                 UserId: userId,
                 MedicationName: req.MedicationName,
                 Dosage: req.Dosage,
                 Frequency: req.Frequency,
-                StartAt: req.StartAt ?? DateTimeOffset.UtcNow.AddHours(1),
+                StartAt: startAt,
                 DurationDays: req.DurationDays,
                 PreferredChannel: req.PreferredChannel,
-                AdherenceRiskScore: req.AdherenceRiskScore);
+                AdherenceRiskScore: req.AdherenceRiskScore,
+                ReminderId: reminderId);
             var res = await dispatcher.StartMedicationReminderAsync(input, req.WorkflowId, ct);
-            return Results.Accepted($"/v1/workflows/{res.WorkflowId}", res);
+            await reminderStore.SaveAsync(new ReminderRecordWrite(
+                ReminderId: reminderId,
+                PatientId: req.PatientId,
+                UserId: userId,
+                WorkflowId: res.WorkflowId,
+                ReminderType: "medication",
+                MedicationName: req.MedicationName,
+                Dosage: req.Dosage,
+                Frequency: req.Frequency,
+                StartAt: startAt,
+                DurationDays: req.DurationDays,
+                PreferredChannel: req.PreferredChannel,
+                AdherenceRiskScore: req.AdherenceRiskScore,
+                Status: "scheduled",
+                CreatedAt: DateTimeOffset.UtcNow,
+                CorrelationId: http.TraceIdentifier), ct);
+            return Results.Accepted($"/v1/workflows/{res.WorkflowId}", new
+            {
+                res.WorkflowId,
+                res.RunId,
+                res.StartedAt,
+                reminderId,
+            });
         });
 
         grp.MapPost("/reminders/{workflowId}/confirm", async (

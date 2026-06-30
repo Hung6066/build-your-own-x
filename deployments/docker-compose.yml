@@ -12,7 +12,7 @@ services:
       POSTGRES_USER: hope
       POSTGRES_PASSWORD: hope
       POSTGRES_DB: hope_agent
-    ports: ["5432:5432"]
+    ports: ["55432:5432"]
     volumes: ["./data/postgres:/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hope -d hope_agent"]
@@ -147,13 +147,53 @@ services:
       LLM__Qwen__BaseUrl: ${QWEN_BASE_URL:-http://vllm:8000/v1}
       Jwt__Secret: ${JWT_SECRET:-dev-secret-please-change-32-chars-minimum-length}
       Temporal__TargetHost: ${TEMPORAL_HOST:-temporal:7233}
-      Temporal__EnableWorker: "true"
+      Temporal__EnableWorker: "false"
+      Runtime__EnableHostedServices: "false"
+      Runtime__ApiAcceptsBackgroundJobs: "false"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
       qdrant: { condition: service_started }
       kafka: { condition: service_started }
     ports: ["5080:8080"]
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      args:
+        PROJECT: Hope.Agent.Worker
+    restart: unless-stopped
+    environment:
+      <<: *otel-env
+      OTEL_SERVICE_NAME: hope.agent.worker
+      DOTNET_ENVIRONMENT: Production
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Postgres: "Host=postgres;Port=5432;Database=hope_agent;Username=hope;Password=hope"
+      ConnectionStrings__Redis: "redis:6379"
+      Qdrant__Host: qdrant
+      Kafka__BootstrapServers: kafka:9092
+      Otel__Endpoint: http://otel-collector:4317
+      LLM__DefaultChatProvider: ${LLM_PROVIDER:-openai}
+      LLM__OpenAI__ApiKey: ${OPENAI_API_KEY:-}
+      LLM__Anthropic__ApiKey: ${ANTHROPIC_API_KEY:-}
+      LLM__Gemini__ApiKey: ${GEMINI_API_KEY:-}
+      LLM__Qwen__BaseUrl: ${QWEN_BASE_URL:-http://vllm:8000/v1}
+      Temporal__TargetHost: ${TEMPORAL_HOST:-temporal:7233}
+      Temporal__EnableWorker: "true"
+      Runtime__EnableHostedServices: "true"
+      Runtime__ApiAcceptsBackgroundJobs: "false"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      qdrant: { condition: service_started }
+      kafka: { condition: service_started }
+      temporal: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /proc/1/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
 
   gateway:
     build:

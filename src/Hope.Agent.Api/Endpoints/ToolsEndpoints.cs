@@ -1,5 +1,7 @@
 using System.Text.Json;
+using System.Security.Claims;
 using Hope.Agent.Application.Tools;
+using Hope.Agent.Application.Security;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -34,6 +36,53 @@ public static class ToolsEndpoints
                 : Results.Ok(BuildToolSchema(tool));
         }).WithSummary("Get a single tool schema by exact name.");
 
+        grp.MapPost("/{name}/invoke", async (
+            [FromRoute] string name,
+            [FromBody] ToolInvokeRequest req,
+            [FromServices] IToolRegistry registry,
+            [FromServices] IToolAccessPolicy accessPolicy,
+            ClaimsPrincipal user,
+            HttpContext http,
+            CancellationToken ct) =>
+        {
+            var tool = registry.Find(name);
+            if (tool is null)
+                return Results.NotFound(new { error = $"Tool '{name}' not found." });
+
+            var roles = user.FindAll(ClaimTypes.Role)
+                .Concat(user.FindAll("role"))
+                .Select(c => c.Value)
+                .Where(r => !string.IsNullOrWhiteSpace(r))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (!accessPolicy.IsAllowed(name, roles))
+                return Results.Forbid();
+
+            var sub = user.FindFirstValue(ClaimTypes.NameIdentifier) ?? user.FindFirstValue("sub");
+            var userId = Guid.TryParse(sub, out var parsedUserId) ? parsedUserId : Guid.Empty;
+            var conversationId = req.ConversationId ?? Guid.Empty;
+            var correlationId = req.CorrelationId ?? http.TraceIdentifier;
+            var argsJson = req.Arguments.ValueKind == JsonValueKind.Undefined
+                ? "{}"
+                : req.Arguments.GetRawText();
+
+            var output = await tool.InvokeAsync(
+                argsJson,
+                new ToolInvocationContext(userId, conversationId, correlationId, roles),
+                ct);
+
+            try
+            {
+                return Results.Ok(JsonSerializer.Deserialize<JsonElement>(output));
+            }
+            catch
+            {
+                return Results.Ok(new { output });
+            }
+        }).RequireAuthorization()
+          .WithSummary("Invoke a registered tool directly for authenticated integration flows.");
+
         return app;
     }
 
@@ -62,3 +111,8 @@ public static class ToolsEndpoints
         };
     }
 }
+
+public sealed record ToolInvokeRequest(
+    JsonElement Arguments,
+    Guid? ConversationId = null,
+    string? CorrelationId = null);

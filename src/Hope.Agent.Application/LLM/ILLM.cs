@@ -1,6 +1,6 @@
 namespace Hope.Agent.Application.LLM;
 
-public sealed record ChatMessage(string Role, string Content, string? Name = null, string? ToolCallId = null);
+public sealed record ChatMessage(string Role, string Content, string? Name = null, string? ToolCallId = null, string? ToolCallsJson = null);
 
 public sealed record ToolDefinition(string Name, string Description, string ParametersJsonSchema);
 

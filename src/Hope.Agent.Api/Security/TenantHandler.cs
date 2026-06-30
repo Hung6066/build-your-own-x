@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using Hope.Agent.Application.Observability;
 using Microsoft.AspNetCore.Authorization;
 
 namespace Hope.Agent.Api.Security;
@@ -30,19 +31,6 @@ internal sealed class TenantHandler(
         if (user.Identity?.IsAuthenticated != true)
             return Task.CompletedTask;
 
-        if (user.IsInRole("admin") || user.IsInRole("system"))
-        {
-            context.Succeed(requirement);
-            return Task.CompletedTask;
-        }
-
-        var callerTenant = user.FindFirstValue("tenant");
-        if (string.IsNullOrWhiteSpace(callerTenant))
-        {
-            // Caller has no tenant claim → cannot prove membership.
-            return Task.CompletedTask;
-        }
-
         var ctx = http.HttpContext;
         if (ctx is null) return Task.CompletedTask;
 
@@ -55,7 +43,36 @@ internal sealed class TenantHandler(
         // No requested tenant → caller implicitly operates within their own tenant.
         if (string.IsNullOrWhiteSpace(requested))
         {
+            if (user.IsInRole("admin") || user.IsInRole("system"))
+            {
+                context.Succeed(requirement);
+                return Task.CompletedTask;
+            }
+
+            if (string.IsNullOrWhiteSpace(user.FindFirstValue("tenant")))
+                return Task.CompletedTask;
+
             context.Succeed(requirement);
+            return Task.CompletedTask;
+        }
+
+        if (user.IsInRole("system"))
+        {
+            context.Succeed(requirement);
+            return Task.CompletedTask;
+        }
+
+        var callerTenant = user.FindFirstValue("tenant");
+        if (string.IsNullOrWhiteSpace(callerTenant))
+        {
+            _log.LogWarning(
+                "authz.tenant.denied | caller=missing requested={Requested} ip={Ip} path={Path}",
+                requested,
+                ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+                ctx.Request.Path.Value);
+            HopeMeters.CrossTenantAccessDenied.Add(1,
+                new KeyValuePair<string, object?>("caller", "missing"),
+                new KeyValuePair<string, object?>("requested", requested));
             return Task.CompletedTask;
         }
 
@@ -71,6 +88,9 @@ internal sealed class TenantHandler(
                 requested,
                 ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
                 ctx.Request.Path.Value);
+            HopeMeters.CrossTenantAccessDenied.Add(1,
+                new KeyValuePair<string, object?>("caller", callerTenant),
+                new KeyValuePair<string, object?>("requested", requested));
         }
 
         return Task.CompletedTask;

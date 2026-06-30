@@ -1,5 +1,6 @@
 using Hope.Agent.Application.Security;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using System.Net;
 using System.Net.Sockets;
 
@@ -18,7 +19,9 @@ namespace Hope.Agent.Infrastructure.Security;
 /// Hostname-level checks run synchronously; IP-level checks use
 /// <see cref="IPAddress.TryParse"/> (no DNS resolution needed for direct-IP URLs).
 /// </summary>
-internal sealed class HeuristicSsrfGuard(ILogger<HeuristicSsrfGuard> log) : ISsrfGuard
+internal sealed class HeuristicSsrfGuard(
+    IOptionsMonitor<EgressPolicyOptions> egress,
+    ILogger<HeuristicSsrfGuard> log) : ISsrfGuard
 {
     // Cloud metadata and reserved hostnames that must never be reached from agent code
     private static readonly HashSet<string> BlockedHostnames = new(StringComparer.OrdinalIgnoreCase)
@@ -58,6 +61,13 @@ internal sealed class HeuristicSsrfGuard(ILogger<HeuristicSsrfGuard> log) : ISsr
             return new SsrfCheckResult(false, $"Blocked host: {host}");
         }
 
+        var opts = egress.CurrentValue;
+        if (opts.RequireAllowlist && opts.AllowedHosts.Length > 0 && !opts.AllowedHosts.Any(allowed => HostMatches(host, allowed)))
+        {
+            log.LogWarning("SSRF guard blocked host outside egress allowlist: {Host}", host);
+            return new SsrfCheckResult(false, $"Host outside egress allowlist: {host}");
+        }
+
         // If the hostname is a literal IP address, check private ranges directly
         if (IPAddress.TryParse(host, out var ip))
         {
@@ -69,6 +79,19 @@ internal sealed class HeuristicSsrfGuard(ILogger<HeuristicSsrfGuard> log) : ISsr
         }
 
         return new SsrfCheckResult(true, null);
+    }
+
+    private static bool HostMatches(string host, string allowed)
+    {
+        if (string.IsNullOrWhiteSpace(allowed)) return false;
+        allowed = allowed.Trim();
+        if (allowed.StartsWith("*.", StringComparison.Ordinal))
+        {
+            var suffix = allowed[1..];
+            return host.EndsWith(suffix, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return string.Equals(host, allowed, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsPrivateOrReserved(IPAddress ip)

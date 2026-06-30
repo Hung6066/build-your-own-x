@@ -109,4 +109,40 @@ public static class HopeMeters
 
     public static readonly Counter<long> TrajectoriesExported =
         Meter.CreateCounter<long>("hope_trajectories_exported_total", description: "Conversation trajectories exported to JSONL for fine-tuning.");
+
+    public static readonly Counter<long> BlockedToolCalls =
+        Meter.CreateCounter<long>("hope_security_blocked_tool_calls_total", description: "Tool calls blocked by policy, sandbox, kill switch, or access control.");
+
+    public static readonly Counter<long> PolicyDenials =
+        Meter.CreateCounter<long>("hope_security_policy_denials_total", description: "Policy-as-code deny decisions by rule id.");
+
+    public static readonly Counter<long> PromptInjectionDetected =
+        Meter.CreateCounter<long>("hope_security_prompt_injection_detected_total", description: "Prompt injection attempts detected by input, retrieval, or tool-output rails.");
+
+    public static readonly Counter<long> PhiRedactionCount =
+        Meter.CreateCounter<long>("hope_security_phi_redactions_total", description: "PHI or secret redactions before external egress.");
+
+    public static readonly Counter<long> CrossTenantAccessDenied =
+        Meter.CreateCounter<long>("hope_security_cross_tenant_access_denied_total", description: "Cross-tenant authorization/RLS attempts denied.");
+
+    public static readonly Counter<long> SuspiciousAutonomyActions =
+        Meter.CreateCounter<long>("hope_security_suspicious_autonomy_actions_total", description: "Autonomous actions flagged by risk policy, drift, or safety budget.");
+
+    public static readonly Counter<long> DataPerimeterDenials =
+        Meter.CreateCounter<long>("hope_security_data_perimeter_denials_total", description: "Data residency, classification, or purpose-based access denials.");
+
+    public static readonly Counter<long> ModelRoutingPolicyBlocks =
+        Meter.CreateCounter<long>("hope_security_model_routing_blocks_total", description: "Model routing choices blocked by tenant, risk, PHI, or residency policy.");
+
+    public static readonly Counter<long> BreakGlassAccesses =
+        Meter.CreateCounter<long>("hope_security_break_glass_access_total", description: "Break-glass accesses requiring post-incident review.");
+
+    public static readonly Counter<long> SecurityIncidentsOpened =
+        Meter.CreateCounter<long>("hope_security_incidents_opened_total", description: "Security incidents opened by type and severity.");
+
+    public static readonly Counter<long> AdversarialSimulationRuns =
+        Meter.CreateCounter<long>("hope_security_adversarial_simulation_runs_total", description: "Continuous red-team simulation runs by result.");
+
+    public static readonly Counter<long> SecurityShieldFailures =
+        Meter.CreateCounter<long>("hope_security_shield_failures_total", description: "Security shield failures that triggered fail-open/fallback behavior.");
 }

@@ -29,7 +29,13 @@ public sealed class LearnedSkill
 public sealed class EvalRun
 {
     public Guid Id { get; init; }
+    public Guid? TenantId { get; init; }
     public required string Suite { get; init; }
+    public string DeploymentVersion { get; init; } = "dev";
+    public string PromptVersion { get; init; } = "hope-runtime-prompt-v1";
+    public string ModelVersion { get; init; } = "unknown";
+    public string ToolsetVersion { get; init; } = "hope-tools-v1";
+    public string PolicyVersion { get; init; } = "hope-policy-v1";
     public int Total { get; set; }
     public int Passed { get; set; }
     public int Failed { get; set; }

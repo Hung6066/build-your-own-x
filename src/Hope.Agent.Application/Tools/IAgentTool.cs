@@ -24,13 +24,20 @@ public sealed record ToolInvocationContext(
     Guid UserId,
     Guid ConversationId,
     string CorrelationId,
-    IReadOnlyList<string>? Roles = null);
+    IReadOnlyList<string>? Roles = null,
+    Guid? TenantId = null,
+    string? IdempotencyKey = null);
 
 public interface IToolRegistry
 {
     IReadOnlyList<IAgentTool> All { get; }
     IAgentTool? Find(string name);
     void Register(IAgentTool tool);
+}
+
+public interface IToolExecutor
+{
+    Task<string> InvokeAsync(IAgentTool tool, string argumentsJson, ToolInvocationContext context, CancellationToken ct);
 }
 
 /// <summary>

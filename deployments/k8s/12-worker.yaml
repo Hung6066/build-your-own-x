@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hope-agent-worker
+  namespace: hope-agent
+  labels: { app: hope-agent-worker }
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: hope-agent-worker }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: hope-agent-worker }
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      serviceAccountName: hope-agent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: worker
+          image: ghcr.io/hope-agent/worker:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: { name: hope-agent-config }
+            - secretRef: { name: hope-agent-secrets }
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: hope.agent.worker
+            - name: DOTNET_ENVIRONMENT
+              value: Production
+            - name: Temporal__EnableWorker
+              value: "true"
+            - name: Runtime__EnableHostedServices
+              value: "true"
+            - name: Runtime__ApiAcceptsBackgroundJobs
+              value: "false"
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "2",    memory: "2Gi" }
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /proc/1/status"]
+            periodSeconds: 30
+            failureThreshold: 5
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "test -f /proc/1/status"]
+            failureThreshold: 30
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hope-agent-worker
+  namespace: hope-agent
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hope-agent-worker
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+    - type: Resource
+      resource: { name: memory, target: { type: Utilization, averageUtilization: 80 } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hope-agent-worker
+  namespace: hope-agent
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: hope-agent-worker }

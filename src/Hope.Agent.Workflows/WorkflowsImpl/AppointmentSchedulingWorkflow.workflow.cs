@@ -21,17 +21,7 @@ public class AppointmentSchedulingWorkflow
     [WorkflowRun]
     public async Task<AppointmentSchedulingResult> RunAsync(AppointmentSchedulingInput input)
     {
-        var actOpts = new ActivityOptions
-        {
-            StartToCloseTimeout = TimeSpan.FromMinutes(2),
-            RetryPolicy = new RetryPolicy
-            {
-                InitialInterval = TimeSpan.FromSeconds(2),
-                BackoffCoefficient = 2.0F,
-                MaximumInterval = TimeSpan.FromMinutes(1),
-                MaximumAttempts = 5,
-            },
-        };
+        var actOpts = WorkflowCommon.DefaultActivityOptions();
 
         Workflow.Logger.LogInformation("Scheduling workflow started for patient {Patient}", input.PatientId);
 
@@ -112,7 +102,7 @@ public class AppointmentSchedulingWorkflow
         stepLog.Add($"optimize:{optimizeResult.Role}");
 
         var selectedDoctorName = ExtractBestDoctor(optimizeResult.Output, slots.Output, input.Urgency);
-        var selectedTime = ExtractBestSlotTime(optimizeResult.Output, slots.Output, input.Urgency);
+        var selectedTime = ExtractBestSlotTime(optimizeResult.Output, slots.Output, input.Urgency, Workflow.UtcNow);
         var selectedSlotId = ExtractBestSlotId(optimizeResult.Output);
         var selectedDoctorId = ExtractBestDoctorId(optimizeResult.Output);
         stepLog.Add($"selected:{selectedDoctorName}@{selectedTime:HH:mm}");
@@ -121,7 +111,9 @@ public class AppointmentSchedulingWorkflow
         status = "booking";
         stepLog.Add(status);
 
-        var bookingId = $"BK-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}";
+        var bookingId = await Workflow.ExecuteActivityAsync(
+            (ClinicalActivities a) => a.GenerateBusinessIdAsync(new BusinessIdActivityInput("BK", 6)),
+            actOpts);
         var bookingCtx = new Dictionary<string, string>
         {
             ["patient_id"] = input.PatientId.ToString(),
@@ -208,7 +200,7 @@ public class AppointmentSchedulingWorkflow
         return "BS. Trực ban";
     }
 
-    private static DateTimeOffset ExtractBestSlotTime(string assignmentJson, string slotsJson, string urgency)
+    private static DateTimeOffset ExtractBestSlotTime(string assignmentJson, string slotsJson, string urgency, DateTimeOffset now)
     {
         try
         {
@@ -231,8 +223,8 @@ public class AppointmentSchedulingWorkflow
         catch { /* keep default */ }
 
         return urgency == "urgent"
-            ? DateTimeOffset.UtcNow.AddHours(2)
-            : DateTimeOffset.UtcNow.AddDays(1).Date.AddHours(9);
+            ? now.AddHours(2)
+            : now.AddDays(1).Date.AddHours(9);
     }
 
     private static string ExtractBestSlotId(string assignmentJson)
@@ -241,10 +233,10 @@ public class AppointmentSchedulingWorkflow
         {
             using var doc = System.Text.Json.JsonDocument.Parse(assignmentJson);
             if (doc.RootElement.TryGetProperty("slot_id", out var sid))
-                return sid.GetString() ?? $"SLOT-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
+                return sid.GetString() ?? "SLOT-FALLBACK";
         }
         catch { /* keep default */ }
-        return $"SLOT-{Guid.NewGuid().ToString("N")[..8].ToUpperInvariant()}";
+        return "SLOT-FALLBACK";
     }
 
     private static string ExtractBestDoctorId(string assignmentJson)

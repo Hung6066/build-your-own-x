@@ -38,6 +38,9 @@ internal sealed class PromptShieldRetrievalRail(
                 HopeMeters.PromptShieldBlocks.Add(1,
                     new KeyValuePair<string, object?>("source", "retrieval_rail"),
                     new KeyValuePair<string, object?>("kind", hit.Record.Kind.ToString()));
+                HopeMeters.PromptInjectionDetected.Add(1,
+                    new KeyValuePair<string, object?>("source", "retrieval_rail"),
+                    new KeyValuePair<string, object?>("kind", hit.Record.Kind.ToString()));
             }
         }
 

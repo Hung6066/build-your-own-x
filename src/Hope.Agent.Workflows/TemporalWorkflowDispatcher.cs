@@ -18,7 +18,8 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
 
     public async Task<WorkflowStartResult> StartPatientAdmissionAsync(PatientAdmissionInput input, string? workflowId = null, CancellationToken ct = default)
     {
-        var id = workflowId ?? $"admission-{input.PatientId:N}-{Guid.CreateVersion7():N}";
+        EnsureWorkflowVersionGate();
+        var id = BuildWorkflowId($"admission-{input.PatientId:N}", workflowId);
         var handle = await client.StartWorkflowAsync(
             (PatientAdmissionWorkflow wf) => wf.RunAsync(input),
             new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
@@ -28,7 +29,8 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
 
     public async Task<WorkflowStartResult> StartEmergencyTriageAsync(EmergencyTriageInput input, string? workflowId = null, CancellationToken ct = default)
     {
-        var id = workflowId ?? $"triage-{input.PatientId:N}-{Guid.CreateVersion7():N}";
+        EnsureWorkflowVersionGate();
+        var id = BuildWorkflowId($"triage-{input.PatientId:N}", workflowId);
         var handle = await client.StartWorkflowAsync(
             (EmergencyTriageWorkflow wf) => wf.RunAsync(input),
             new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
@@ -38,7 +40,8 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
 
     public async Task<WorkflowStartResult> StartAppointmentSchedulingAsync(AppointmentSchedulingInput input, string? workflowId = null, CancellationToken ct = default)
     {
-        var id = workflowId ?? $"scheduling-{input.PatientId:N}-{Guid.CreateVersion7():N}";
+        EnsureWorkflowVersionGate();
+        var id = BuildWorkflowId($"scheduling-{input.PatientId:N}", workflowId);
         var handle = await client.StartWorkflowAsync(
             (AppointmentSchedulingWorkflow wf) => wf.RunAsync(input),
             new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
@@ -48,7 +51,8 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
 
     public async Task<WorkflowStartResult> StartMedicationReminderAsync(MedicationReminderInput input, string? workflowId = null, CancellationToken ct = default)
     {
-        var id = workflowId ?? $"reminder-{input.PatientId:N}-{Guid.CreateVersion7():N}";
+        EnsureWorkflowVersionGate();
+        var id = BuildWorkflowId($"reminder-{input.PatientId:N}", workflowId);
         var handle = await client.StartWorkflowAsync(
             (MedicationReminderWorkflow wf) => wf.RunAsync(input),
             new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
@@ -64,7 +68,8 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
 
     public async Task<WorkflowStartResult> StartAuditReportAsync(AuditReportInput input, string? workflowId = null, CancellationToken ct = default)
     {
-        var id = workflowId ?? $"audit-{input.ReportType}-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.CreateVersion7():N}";
+        EnsureWorkflowVersionGate();
+        var id = BuildWorkflowId($"audit-{input.ReportType}-{DateTimeOffset.UtcNow:yyyyMMdd}", workflowId);
         var handle = await client.StartWorkflowAsync(
             (AuditReportWorkflow wf) => wf.RunAsync(input),
             new WorkflowOptions(id: id, taskQueue: options.TaskQueue)).ConfigureAwait(false);
@@ -153,4 +158,108 @@ internal sealed class TemporalWorkflowDispatcher : IWorkflowDispatcher
         var handle = client.GetWorkflowHandle(workflowId);
         await handle.CancelAsync().ConfigureAwait(false);
     }
+
+    private string BuildWorkflowId(string prefix, string? explicitId)
+    {
+        var version = GetNormalizedWorkflowVersion();
+
+        if (!string.IsNullOrWhiteSpace(explicitId))
+        {
+            var explicitVersion = TryExtractWorkflowVersion(explicitId);
+            if (!string.IsNullOrWhiteSpace(explicitVersion)
+                && !string.Equals(explicitVersion, version, StringComparison.OrdinalIgnoreCase)
+                && !IsExplicitVersionAllowed(explicitVersion))
+            {
+                throw new InvalidOperationException(
+                    $"WorkflowId version mismatch blocked by rollout policy: explicit='{explicitVersion}' configured='{version}'.");
+            }
+
+            return string.IsNullOrWhiteSpace(explicitVersion)
+                ? $"{explicitId}-wv{version}"
+                : explicitId;
+        }
+
+        return $"{prefix}-{Guid.CreateVersion7():N}-wv{version}";
+    }
+
+    private void EnsureWorkflowVersionGate()
+    {
+        if (!options.EnforceWorkflowVersionGate)
+            return;
+
+        var version = GetNormalizedWorkflowVersion();
+        var allowed = GetAllowedVersionsForNow();
+
+        if (!allowed.Contains(version, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                $"Temporal workflow version '{version}' is not in allowed set [{string.Join(",", allowed)}].");
+        }
+    }
+
+    private string GetNormalizedWorkflowVersion()
+        => string.IsNullOrWhiteSpace(options.WorkflowVersion)
+            ? "v1"
+            : options.WorkflowVersion.Trim();
+
+    private static string? TryExtractWorkflowVersion(string workflowId)
+    {
+        var marker = workflowId.LastIndexOf("-wv", StringComparison.OrdinalIgnoreCase);
+        if (marker < 0)
+            return null;
+
+        var candidate = workflowId[(marker + 3)..].Trim();
+        return string.IsNullOrWhiteSpace(candidate) ? null : candidate;
+    }
+
+    private bool IsExplicitVersionAllowed(string explicitVersion)
+    {
+        var current = GetNormalizedWorkflowVersion();
+        if (string.Equals(explicitVersion, current, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!options.EnforceWorkflowVersionGate)
+            return true;
+
+        if (IsAfterCutover()
+            && options.AutoBlockPreviousVersionsAfterCutover)
+        {
+            return false;
+        }
+
+        var allowed = GetAllowedVersionsForNow();
+        return allowed.Contains(explicitVersion, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private string[] GetAllowedVersionsForNow()
+    {
+        var configured = options.AllowedWorkflowVersions
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (configured.Count == 0)
+            configured.Add(GetNormalizedWorkflowVersion());
+
+        if (!options.EnableCanaryMultiVersionRollout)
+            return configured.ToArray();
+
+        if (IsAfterCutover())
+            return configured.ToArray();
+
+        foreach (var canary in options.CanaryAllowedWorkflowVersions)
+        {
+            if (!string.IsNullOrWhiteSpace(canary)
+                && !configured.Contains(canary, StringComparer.OrdinalIgnoreCase))
+            {
+                configured.Add(canary.Trim());
+            }
+        }
+
+        return configured.ToArray();
+    }
+
+    private bool IsAfterCutover()
+        => options.CutoverAtUtc.HasValue && DateTimeOffset.UtcNow >= options.CutoverAtUtc.Value;
 }

@@ -117,6 +117,7 @@ internal sealed class HisBookingAgent(IToolRegistry tools) : IAgentRole
             patient_id = task.Context.GetValueOrDefault("patient_id", task.UserId.ToString()),
             doctor_id = task.Context.GetValueOrDefault("doctor", "DR-GEN-001"),
             slot_id = task.Context.GetValueOrDefault("slot_id", $"SLOT-{Guid.NewGuid().ToString("N")[..8]}"),
+            time = task.Context.GetValueOrDefault("time", string.Empty),
             reason = task.Context.GetValueOrDefault("reason", task.Input),
             booking_id = task.Context.GetValueOrDefault("booking_id", string.Empty),
         });
@@ -144,6 +145,36 @@ internal sealed class MedicationLookupAgent(IToolRegistry tools) : IAgentRole
         var output = await tool.InvokeAsync(args, ctx, ct);
         return new AgentRoleResult(Name, true, output);
     }
+}
+
+internal sealed class ReminderPersistenceAgent(IToolRegistry tools) : IAgentRole
+{
+    public string Name => "reminder-persistence";
+    public string Description => "Persists medication/follow-up reminder status changes into Postgres.";
+    public IReadOnlyList<string> Intents { get; } = ["update_reminder_status", "reminder_status"];
+
+    public async Task<AgentRoleResult> HandleAsync(AgentTask task, CancellationToken ct)
+    {
+        var tool = tools.Find("update_reminder_status");
+        if (tool is null) return new AgentRoleResult(Name, false, "update_reminder_status tool unavailable");
+
+        var ctx = new ToolInvocationContext(task.UserId, task.ConversationId ?? Guid.Empty, task.CorrelationId ?? string.Empty);
+        var args = JsonSerializer.Serialize(new
+        {
+            reminder_id = task.Context.GetValueOrDefault("reminder_id", string.Empty),
+            status = task.Context.GetValueOrDefault("status", "scheduled"),
+            confirmed_count = TryParseNullableInt(task.Context.GetValueOrDefault("confirmed_count", string.Empty)),
+            missed_count = TryParseNullableInt(task.Context.GetValueOrDefault("missed_count", string.Empty)),
+            last_confirmed_at = task.Context.GetValueOrDefault("last_confirmed_at", string.Empty),
+            last_missed_at = task.Context.GetValueOrDefault("last_missed_at", string.Empty),
+            escalation_reason = task.Context.GetValueOrDefault("escalation_reason", string.Empty),
+        });
+        var output = await tool.InvokeAsync(args, ctx, ct);
+        return new AgentRoleResult(Name, true, output);
+    }
+
+    private static int? TryParseNullableInt(string value)
+        => int.TryParse(value, out var parsed) ? parsed : null;
 }
 
 // ── Audit Execution (4-in-1 intra-workflow role) ──────────────────────────────
@@ -229,9 +260,12 @@ internal sealed class AuditExecutionAgent(IToolRegistry tools, ILLMRouter llm) :
         var args = JsonSerializer.Serialize(new
         {
             report_id = task.Context.GetValueOrDefault("report_id", "UNKNOWN"),
+            report_type = task.Context.GetValueOrDefault("report_type", "operational"),
+            period_start = task.Context.GetValueOrDefault("period_start", string.Empty),
+            period_end = task.Context.GetValueOrDefault("period_end", string.Empty),
             narrative = task.Context.GetValueOrDefault("narrative", task.Input),
             anomalies_json = task.Context.GetValueOrDefault("anomalies", string.Empty),
-            metrics_json = task.Context.GetValueOrDefault("narrative", string.Empty),
+            metrics_json = task.Context.GetValueOrDefault("metrics", string.Empty),
             format = task.Context.GetValueOrDefault("format", "json"),
         });
         var output = await tool.InvokeAsync(args, ctx, ct);

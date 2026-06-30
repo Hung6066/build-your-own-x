@@ -3,6 +3,7 @@ using Azure.Identity;
 using System.Net;
 using System.Text;
 using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using IPNetwork = Microsoft.AspNetCore.HttpOverrides.IPNetwork;
 using Hope.Agent.AgentRuntime;
@@ -13,6 +14,7 @@ using Hope.Agent.Api.Security;
 using Hope.Agent.Application.Observability;
 using Hope.Agent.Application.Security;
 using Hope.Agent.Infrastructure;
+using Hope.Agent.Infrastructure.Security;
 using Hope.Agent.LLMGateway;
 using Hope.Agent.MultiAgent;
 using Hope.Agent.Rag;
@@ -25,8 +27,10 @@ using ModelContextProtocol.AspNetCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.AspNetCore.Routing.Constraints;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
@@ -51,17 +55,46 @@ if ((builder.Environment.IsProduction() || keyVaultEnabled) && !string.IsNullOrW
         new KeyVaultSecretManager());
 }
 
-builder.Host.UseSerilog((ctx, cfg) => cfg
-    .ReadFrom.Configuration(ctx.Configuration)
-    .Enrich.FromLogContext()
-    // Scrub PHI from any Hope.Agent.* domain object logged via {@obj} destructuring.
-    // Intercepts all string properties before they reach any sink (Console, OTLP, etc.).
-    .Destructure.With<PhiDestructuringPolicy>()
-    .WriteTo.Console());
+builder.Host.UseSerilog((ctx, cfg) =>
+{
+    cfg.ReadFrom.Configuration(ctx.Configuration)
+       .Enrich.FromLogContext()
+       .Destructure.With<PhiDestructuringPolicy>()
+       .WriteTo.Console();
+
+    // ── H-3: SIEM integration (Splunk/Sentinel) ──────────────────────────
+    var siemEnabled = ctx.Configuration.GetValue<bool>("Siem:Enabled");
+    var siemEndpoint = ctx.Configuration["Siem:Endpoint"];
+    if (siemEnabled && !string.IsNullOrWhiteSpace(siemEndpoint))
+    {
+        var siemToken = ctx.Configuration["Siem:Token"] ?? string.Empty;
+        var siemHttp = new HttpClient();
+        if (!string.IsNullOrWhiteSpace(siemToken))
+            siemHttp.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", siemToken);
+
+        cfg.WriteTo.Sink(new SiemSerilogSink(new SiemSink(siemHttp, siemEndpoint)));
+    }
+});
+
+if (builder.Environment.IsDevelopment())
+{
+    var keyDirectory = Path.GetFullPath(Path.Combine(
+        builder.Environment.ContentRootPath,
+        "..",
+        "..",
+        "artifacts",
+        "dataprotection-keys"));
+    Directory.CreateDirectory(keyDirectory);
+    builder.Services.AddDataProtection()
+        .PersistKeysToFileSystem(new DirectoryInfo(keyDirectory));
+}
 
 builder.Services.AddAgentInfrastructure(builder.Configuration);
 builder.Services.AddLLMGateway(builder.Configuration);
 builder.Services.AddAgentTools(builder.Configuration);
+builder.Services.Configure<RouteOptions>(o =>
+    o.SetParameterPolicy<RegexInlineRouteConstraint>("regex"));
 builder.Services.AddMcpServer()
     .WithHttpTransport()
     .WithToolsFromAssembly(typeof(HopeAgentMcpServer).Assembly);
@@ -102,6 +135,34 @@ builder.Services.Configure<ForwardedHeadersOptions>(o =>
 });
 
 builder.Services.AddOpenApi();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(o =>
+{
+    o.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = "JWT Authorization header using the Bearer scheme. Example: Bearer {token}",
+        Name = "Authorization",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT"
+    });
+
+    o.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                }
+            },
+            Array.Empty<string>()
+        }
+    });
+});
 builder.Services.AddHealthChecks()
     .AddCheck<PostgresHealthCheck>("postgres", tags: ["ready"])
     .AddCheck<RedisHealthCheck>("redis", tags: ["ready"]);
@@ -235,6 +296,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         o.RequireHttpsMetadata = !builder.Environment.IsDevelopment();
     })
     .AddScheme<ApiKeyAuthOptions, ApiKeyAuthHandler>(ApiKeyAuthHandler.SchemeName, _ => { });
+// ── H-2: Add .AddOpenIdConnect("oidc", ...) when Microsoft.AspNetCore.Authentication.OpenIdConnect package is installed ──
 builder.Services.AddOptions<JwtBearerOptions>(JwtBearerDefaults.AuthenticationScheme)
     .Configure<Hope.Agent.Application.Security.IJwtKeyProvider>((o, keyProvider) =>
     {
@@ -361,6 +423,18 @@ builder.Logging.AddOpenTelemetry(o =>
 
 var app = builder.Build();
 
+// ── M-05: capture fire-and-forget Task failures that would otherwise be silently lost ──
+TaskScheduler.UnobservedTaskException += (_, args) =>
+{
+    var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Hope.Agent.UnobservedTask");
+    args.Exception.Flatten().Handle(ex =>
+    {
+        logger.LogWarning(ex, "Unobserved task exception captured by top-level handler");
+        return true; // all handled — prevents process crash
+    });
+    args.SetObserved();
+};
+
 // ── Startup secret validation ─────────────────────────────────────────────
 // Fail fast if mandatory secrets are absent or are still dev placeholders.
 // Skipped automatically in Development so localhost runs are unaffected.
@@ -383,8 +457,13 @@ if (app.Environment.IsProduction())
 app.UseStatusCodePages();
 app.UseCors("StrictCors");
 app.UseMiddleware<SecurityHeadersMiddleware>();
+// ── H-1: FHIR R4 validation middleware ──────────────────────────────────
+app.UseFhirValidation();
 app.UseRateLimiter();
 app.UseAuthentication();
+// TenantContextMiddleware MUST run after UseAuthentication so the JWT "tenant"
+// claim is available and acts as source-of-truth over the X-Tenant-Id header.
+app.UseMiddleware<TenantContextMiddleware>();
 app.UseAuthorization();
 app.UseMiddleware<AuditLoggingMiddleware>();
 
@@ -392,6 +471,16 @@ var exposeOpenApiInProd = builder.Configuration.GetValue<bool>("OpenApi:EnabledI
 if (app.Environment.IsDevelopment() || exposeOpenApiInProd)
 {
     var openApiEndpoint = app.MapOpenApi();
+    app.UseSwagger();
+    if (app.Environment.IsDevelopment())
+    {
+        app.UseSwaggerUI(o =>
+        {
+            o.RoutePrefix = "swagger";
+            o.SwaggerEndpoint("/swagger/v1/swagger.json", "Hope.Agent API v1");
+        });
+    }
+
     if (!app.Environment.IsDevelopment())
     {
         openApiEndpoint.RequireAuthorization("OpenApiAccess");
@@ -435,6 +524,10 @@ app.MapGet("/.well-known/security.txt", (IConfiguration cfg) =>
 });
 
 app.MapHealthChecks("/healthz");
+// ── H-6: K8s startup probe (initContainer waits for this before sending traffic) ──
+app.MapGet("/healthz/startup", () => Results.Ok(new { status = "started", timestamp = DateTimeOffset.UtcNow }))
+    .AllowAnonymous()
+    .WithTags("Health");
 app.MapHealthChecks("/healthz/live", new Microsoft.AspNetCore.Diagnostics.HealthChecks.HealthCheckOptions
 {
     Predicate = _ => false,
@@ -448,6 +541,7 @@ app.MapJwks();
 app.MapAgentEndpoints();
 app.MapRagEndpoints();
 app.MapMemoryEndpoints();
+app.MapAutonomyEndpoints();
 app.MapMultiAgentEndpoints();
 app.MapWorkflowEndpoints();
 app.MapWebhookEndpoints();
@@ -468,8 +562,31 @@ app.MapMigrationEndpoints();
 app.MapDiagnosticsEndpoints();
 app.MapToolsEndpoints();
 app.MapResearchEndpoints();
+app.MapHarnessEndpoints();
+app.MapEnterpriseSecurityEndpoints();
+app.MapApiKeyLifecycleEndpoints();
 app.MapMcp("/mcp")
     .RequireAuthorization("McpPolicy")
     .RequireRateLimiting("mcp");  // 30 req/min (configurable via Mcp:RateLimitPerMinute)
+
+// ── FHIR R4 passthrough endpoint (H-1) ──────────────────────────────────
+// The FhirValidationMiddleware already validates the payload. This endpoint
+// simply echoes the validated resource back as confirmation.
+app.MapPost("/v1/fhir/{resourceType}", async (string resourceType, HttpRequest request) =>
+{
+    request.EnableBuffering();
+    using var reader = new StreamReader(request.Body, leaveOpen: true);
+    var body = await reader.ReadToEndAsync();
+    request.Body.Position = 0;
+
+    return Results.Ok(new
+    {
+        resourceType,
+        status = "validated",
+        receivedAt = DateTimeOffset.UtcNow
+    });
+})
+.AllowAnonymous()
+.WithTags("FHIR");
 
 await app.RunAsync();

@@ -2,6 +2,7 @@ using Hope.Agent.Application.Tools;
 using Hope.Agent.Tools.Mcp;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 
 namespace Hope.Agent.Tools;
@@ -29,11 +30,15 @@ public static class DependencyInjection
         services.AddSingleton<IToolRegistry, ToolRegistry>();
 
         // Adaptive MCMF cost hints — accumulates booking success rates at runtime
-        services.AddSingleton<IOptimizationCostHints, AdaptiveCostHints>();
+        services.TryAddSingleton<IOptimizationCostHints, AdaptiveCostHints>();
+
+        services.Configure<ClinicalIntegrationOptions>(configuration.GetSection(ClinicalIntegrationOptions.Section));
+        services.AddHttpClient("clinical-integrations", c => c.Timeout = TimeSpan.FromSeconds(30));
 
         // MCP client: kết nối tới các MCP server bên ngoài
         services.Configure<McpOptions>(configuration.GetSection("Mcp"));
-        services.AddHostedService<McpToolDiscoveryService>();
+        if (configuration.GetValue("Runtime:EnableHostedServices", true))
+            services.AddHostedService<McpToolDiscoveryService>();
 
         return services;
     }

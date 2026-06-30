@@ -6,11 +6,19 @@ public sealed class McpOptions
     public List<McpServerEntry> Servers { get; set; } = [];
 
     /// <summary>
-    /// SHA-256 hex hashes của các API key hợp lệ cho MCP endpoint.
+    /// SHA-256 hex hashes của các API key hợp lệ cho MCP endpoint (legacy — không có lifecycle).
     /// Tạo hash: <c>echo -n "your-key" | sha256sum</c>
     /// hoặc gọi <c>ApiKeyAuthHandler.HashKey("your-key")</c>.
+    /// Ưu tiên dùng <see cref="ApiKeys"/> để có expiry/revocation.
     /// </summary>
     public List<string> ApiKeyHashes { get; set; } = [];
+
+    /// <summary>
+    /// API keys có lifecycle (rotation/expiry/revocation). Hỗ trợ hot-reload qua
+    /// IOptionsMonitor: thay đổi config (thêm key mới, set ExpiresAt/Revoked cho key cũ)
+    /// có hiệu lực ngay không cần restart — đây là cơ chế rotation zero-downtime.
+    /// </summary>
+    public List<ApiKeyEntry> ApiKeys { get; set; } = [];
 
     /// <summary>
     /// Danh sách tool được phép gọi qua MCP endpoint.
@@ -41,4 +49,20 @@ public sealed class McpServerEntry
 
     /// <summary>Nếu true, lỗi kết nối không crash app — chỉ log warning.</summary>
     public bool Optional { get; set; } = true;
+}
+
+/// <summary>Một API key có vòng đời quản lý được (rotation/expiry/revocation).</summary>
+public sealed class ApiKeyEntry
+{
+    /// <summary>Tên định danh của key (ghi vào claim/audit — KHÔNG phải bí mật).</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>SHA-256 hex của raw key.</summary>
+    public string Hash { get; set; } = string.Empty;
+
+    /// <summary>Thời điểm hết hạn (UTC). Null = không hết hạn.</summary>
+    public DateTimeOffset? ExpiresAt { get; set; }
+
+    /// <summary>true = key bị thu hồi ngay lập tức.</summary>
+    public bool Revoked { get; set; }
 }

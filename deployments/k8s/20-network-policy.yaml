@@ -35,3 +35,25 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hope-agent-worker-deny-egress-default
+  namespace: hope-agent
+spec:
+  podSelector:
+    matchLabels: { app: hope-agent-worker }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: { matchLabels: { name: data } }
+    - to:
+        - namespaceSelector: { matchLabels: { name: workflows } }
+    - to:
+        - namespaceSelector: { matchLabels: { name: observability } }
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -58,6 +58,7 @@ internal sealed partial class HeuristicPromptShield(
         if (reasons.Count > 0)
         {
             HopeMeters.PromptShieldBlocks.Add(1, new KeyValuePair<string, object?>("reason", reasons[0]));
+            HopeMeters.PromptInjectionDetected.Add(1, new KeyValuePair<string, object?>("source", "input"), new KeyValuePair<string, object?>("reason", reasons[0]));
             var hardHit = reasons.Exists(r =>
                 r.StartsWith("hard:", StringComparison.Ordinal) ||
                 r.StartsWith("learned:", StringComparison.Ordinal));

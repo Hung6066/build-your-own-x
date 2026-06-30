@@ -1,7 +1,9 @@
 using Hope.Agent.Application.Agents;
 using Hope.Agent.Application.Agents.Multi;
+using Hope.Agent.Application.Autonomy;
 using Hope.Agent.Application.Eventing;
 using Hope.Agent.Application.Notifications;
+using Hope.Agent.Domain.Autonomy;
 using System.Text.Json;
 using Temporalio.Activities;
 
@@ -17,17 +19,20 @@ public sealed class ClinicalActivities
     private readonly IEventPublisher publisher;
     private readonly IRealtimeNotifier notifier;
     private readonly IWorkflowOutcomeSink? outcomeSink;
+    private readonly IAutonomyDecisionService? autonomy;
 
     public ClinicalActivities(
         IMultiAgentOrchestrator orchestrator,
         IEventPublisher publisher,
         IRealtimeNotifier notifier,
-        IWorkflowOutcomeSink? outcomeSink = null)
+        IWorkflowOutcomeSink? outcomeSink = null,
+        IAutonomyDecisionService? autonomy = null)
     {
         this.orchestrator = orchestrator;
         this.publisher = publisher;
         this.notifier = notifier;
         this.outcomeSink = outcomeSink;
+        this.autonomy = autonomy;
     }
 
     [Activity]
@@ -45,8 +50,48 @@ public sealed class ClinicalActivities
             Priority: input.Priority);
 
         var result = await orchestrator.DispatchAsync(task, ct).ConfigureAwait(false);
+        if (autonomy is not null)
+        {
+            try
+            {
+                var success = result.Trace.Count > 0 && result.Trace[^1].Success;
+                var evaluation = autonomy.Evaluate(new AutonomyEvaluationRequest(
+                    input.UserId,
+                    TryGetPatientId(input.Context),
+                    input.ConversationId,
+                    input.Intent,
+                    result.FinalRole,
+                    input.Input,
+                    null,
+                    null,
+                    success ? 0.86 : 0.55,
+                    input.CorrelationId));
+                await autonomy.RecordDecisionAsync(new AgentDecisionWrite(
+                    input.UserId,
+                    TryGetPatientId(input.Context),
+                    input.ConversationId,
+                    input.Intent,
+                    result.FinalRole,
+                    input.Input.Length <= 512 ? input.Input : input.Input[..512],
+                    null,
+                    JsonSerializer.Serialize(new { trace_count = result.Trace.Count, final_role = result.FinalRole }),
+                    null,
+                    evaluation.RiskLevel,
+                    success ? 0.86 : 0.55,
+                    evaluation.PolicyDecision,
+                    evaluation.DecisionStatus,
+                    evaluation.Reason,
+                    input.CorrelationId), ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Autonomy ledger failures must not break workflow activities.
+            }
+        }
 
-        // Record the outcome into the learning system (non-blocking — never throws to caller)
+        // Record the outcome into the learning system.
+        // Must be awaited here: fire-and-forget can outlive the activity scope and
+        // then use disposed scoped dependencies (DbContext, repositories).
         if (outcomeSink is not null)
         {
             var outcome = new WorkflowOutcome(
@@ -57,7 +102,14 @@ public sealed class ClinicalActivities
                 RewardSignal: result.Trace.Count > 0 && result.Trace[^1].Success ? 1.0 : 0.0,
                 CorrelationId: input.CorrelationId,
                 Context: input.Context is { Count: > 0 } ? input.Context : null);
-            _ = outcomeSink.RecordAsync(outcome, CancellationToken.None);
+            try
+            {
+                await outcomeSink.RecordAsync(outcome, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Ignore learning-path failures so the clinical activity result remains stable.
+            }
         }
 
         return new AgentDispatchResult(result.TaskId, result.FinalRole, result.Output, result.Trace.Count);
@@ -100,6 +152,23 @@ public sealed class ClinicalActivities
         // No-op marker — workflows wait for the approval signal; this activity exists so the
         // step is durable in workflow history with a clear name for the dashboard timeline.
         Task.FromResult(true);
+
+    [Activity]
+    public Task<string> GenerateBusinessIdAsync(BusinessIdActivityInput input)
+    {
+        var date = DateTimeOffset.UtcNow.ToString("yyyyMMdd");
+        var suffix = Guid.CreateVersion7().ToString("N")[..input.SuffixLength].ToUpperInvariant();
+        return Task.FromResult($"{input.Prefix}-{date}-{suffix}");
+    }
+
+    private static Guid? TryGetPatientId(IReadOnlyDictionary<string, string>? context)
+    {
+        if (context is not null
+            && context.TryGetValue("patient_id", out var raw)
+            && Guid.TryParse(raw, out var patientId))
+            return patientId;
+        return null;
+    }
 }
 
 public sealed record AgentDispatchInput(
@@ -122,3 +191,5 @@ public sealed record NotificationActivityInput(
     Dictionary<string, string>? Metadata = null);
 
 public sealed record EventActivityInput(string Topic, string Key, object Payload);
+
+public sealed record BusinessIdActivityInput(string Prefix, int SuffixLength = 8);

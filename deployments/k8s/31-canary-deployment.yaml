@@ -1,0 +1,124 @@
+# K8s Canary Deployment — closes gap H-6
+# Requires: Istio service mesh + Argo Rollouts
+# Usage: kubectl apply -f deployments/k8s/30-vllm.yaml (existing)
+#        kubectl apply -f deployments/k8s/
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: hope-api-vs
+  namespace: hope-agent
+spec:
+  hosts:
+    - hope-api
+  http:
+    # Controlled canary: header X-Canary: true routes to canary pods
+    - match:
+        - headers:
+            x-canary:
+              exact: "true"
+      route:
+        - destination:
+            host: hope-api-canary
+            port:
+              number: 8080
+    # Default: 90% stable, 10% canary (gradually increase)
+    - route:
+        - destination:
+            host: hope-api-stable
+            port:
+              number: 8080
+          weight: 90
+        - destination:
+            host: hope-api-canary
+            port:
+              number: 8080
+          weight: 10
+
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: hope-api-dr
+  namespace: hope-agent
+spec:
+  host: hope-api
+  subsets:
+    - name: stable
+      labels:
+        version: stable
+    - name: canary
+      labels:
+        version: canary
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        http1MaxPendingRequests: 50
+        http2MaxRequests: 100
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 60s
+      maxEjectionPercent: 50
+
+---
+# Argo Rollouts canary analysis
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: hope-api-analysis
+  namespace: hope-agent
+spec:
+  metrics:
+    - name: error-rate
+      interval: 30s
+      successCondition: result < 0.01
+      provider:
+        prometheus:
+          address: http://prometheus-server.monitoring:9090
+          query: |
+            rate(http_requests_total{
+              status=~"5..",
+              namespace="hope-agent"
+            }[5m])
+            /
+            rate(http_requests_total{
+              namespace="hope-agent"
+            }[5m])
+    - name: p99-latency
+      interval: 30s
+      successCondition: result < 3.0
+      provider:
+        prometheus:
+          address: http://prometheus-server.monitoring:9090
+          query: |
+            histogram_quantile(0.99,
+              rate(http_request_duration_seconds_bucket{
+                namespace="hope-agent"
+              }[5m]))
+    - name: agent-cost
+      interval: 60s
+      successCondition: result < 0.002
+      provider:
+        prometheus:
+          address: http://prometheus-server.monitoring:9090
+          query: |
+            rate(agent_cost_usd_total{
+              namespace="hope-agent"
+            }[5m])
+
+---
+# Startup probe + PodDisruptionBudget
+apiVersion: v1
+kind: PodDisruptionBudget
+metadata:
+  name: hope-api-pdb
+  namespace: hope-agent
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: hope-api

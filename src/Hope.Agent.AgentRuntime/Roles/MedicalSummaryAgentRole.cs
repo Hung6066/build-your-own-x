@@ -2,7 +2,9 @@ using Hope.Agent.Application.Agents.Multi;
 using Hope.Agent.Application.Rag;
 using Hope.Agent.Application.Security;
 using Hope.Agent.Application.LLM;
+using Hope.Agent.Application.Tools;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace Hope.Agent.AgentRuntime.Roles;
 
@@ -16,17 +18,23 @@ internal sealed class MedicalSummaryAgentRole : IAgentRole
     private readonly IRetrievalRail retrievalRail;
     private readonly IOutputShield outputShield;
     private readonly IPromptShield promptShield;
+    private readonly IToolRegistry tools;
+    private readonly ILLMRouter llm;
     private readonly ILogger<MedicalSummaryAgentRole> log;
 
     public MedicalSummaryAgentRole(
         IRetrievalRail retrievalRail,
         IOutputShield outputShield,
         IPromptShield promptShield,
+        IToolRegistry tools,
+        ILLMRouter llm,
         ILogger<MedicalSummaryAgentRole> log)
     {
         this.retrievalRail = retrievalRail;
         this.outputShield = outputShield;
         this.promptShield = promptShield;
+        this.tools = tools;
+        this.llm = llm;
         this.log = log;
     }
 
@@ -67,12 +75,34 @@ internal sealed class MedicalSummaryAgentRole : IAgentRole
             log.LogWarning("[MedicalSummary] Output shield redacted content: {Detections}",
                 string.Join(", ", outputCheck.Detections));
 
+        var summaryId = $"SUM-{DateTimeOffset.UtcNow:yyyyMMdd}-{Guid.CreateVersion7().ToString("N")[..8].ToUpperInvariant()}";
+        if (tools.Find("persist_medical_summary") is { } persistTool)
+        {
+            var patientId = task.Context.GetValueOrDefault("patient_id", task.UserId.ToString());
+            var toolCtx = new ToolInvocationContext(task.UserId, task.ConversationId ?? Guid.Empty, task.CorrelationId ?? string.Empty);
+            var toolArgs = JsonSerializer.Serialize(new
+            {
+                summary_id = summaryId,
+                patient_id = patientId,
+                summary_type = task.Context.GetValueOrDefault("summary_type", task.Intent == "soap_note" ? "soap" : "medical_summary"),
+                audience = audience ?? "clinician",
+                specialty,
+                source_context = task.Input,
+                summary_text = safeOutput,
+                model = task.Context.GetValueOrDefault("model", string.Empty),
+                status = "completed",
+            });
+
+            await persistTool.InvokeAsync(toolArgs, toolCtx, ct).ConfigureAwait(false);
+        }
+
         return new AgentRoleResult(
             Role: Name,
             Success: true,
             Output: safeOutput,
             Metadata: new Dictionary<string, string>
             {
+                ["summary_id"] = summaryId,
                 ["audience"] = audience ?? "clinician",
                 ["specialty"] = specialty ?? "general",
                 ["output_shielded"] = outputCheck.HasLeak.ToString(),
@@ -99,16 +129,21 @@ internal sealed class MedicalSummaryAgentRole : IAgentRole
             format;
     }
 
-    private static Task<string> GenerateSummaryAsync(string ehrContext, string systemPrompt, CancellationToken ct)
+    private async Task<string> GenerateSummaryAsync(string ehrContext, string systemPrompt, CancellationToken ct)
     {
-        // Actual LLM call is delegated to AgentOrchestrator via tool-calling pipeline.
-        // This role provides the structured system prompt and validated context;
-        // the orchestrator invokes the LLM and returns the result back here.
-        // Returning a structured placeholder that the orchestrator will replace.
-        _ = ct;
-        return Task.FromResult(
-            $"[SYSTEM: {systemPrompt}]\n\n" +
-            $"[EHR CONTEXT]\n{ehrContext}\n\n" +
-            "[Tóm tắt bệnh án sẽ được LLM điền vào đây sau khi qua pipeline của AgentOrchestrator]");
+        var chat = llm.SelectChat();
+        var response = await chat.CompleteAsync(new ChatRequest(
+            [
+                new ChatMessage("system", systemPrompt),
+                new ChatMessage("user",
+                    "Context bệnh án:\n" +
+                    ehrContext +
+                    "\n\nYêu cầu: tạo bản tóm tắt có cấu trúc, nêu rõ dữ liệu thiếu, không suy diễn ngoài context."),
+            ],
+            Temperature: 0.2f), ct).ConfigureAwait(false);
+
+        return string.IsNullOrWhiteSpace(response.Content)
+            ? "Không tạo được tóm tắt vì mô hình không trả về nội dung."
+            : response.Content;
     }
 }

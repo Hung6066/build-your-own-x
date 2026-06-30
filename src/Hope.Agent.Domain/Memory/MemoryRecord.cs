@@ -3,6 +3,7 @@ namespace Hope.Agent.Domain.Memory;
 public sealed class MemoryRecord
 {
     public Guid Id { get; init; }
+    public Guid? TenantId { get; init; }
     public Guid UserId { get; init; }
     public Guid? ConversationId { get; init; }
     public MemoryKind Kind { get; init; }
